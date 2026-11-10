@@ -672,6 +672,38 @@ defmodule GPUI.RuntimeTest do
     end
   end
 
+  test "logs render failures that would otherwise discard an update silently" do
+    key = {RenderFailureView, :fail?}
+    :persistent_term.put(key, false)
+    on_exit(fn -> :persistent_term.erase(key) end)
+
+    runtime =
+      start_supervised!(
+        {GPUI.Runtime, app: RenderFailureApp, display: GPUI.Test.Display, poll_interval: nil}
+      )
+
+    :persistent_term.put(key, true)
+
+    polled =
+      ExUnit.CaptureLog.capture_log(fn ->
+        {:ok, _} =
+          GPUI.Runtime.inject_event(runtime, %{type: :click, window_id: 1, event: "ignored"})
+
+        send(runtime, :poll_display)
+        :sys.get_state(runtime)
+      end)
+
+    assert polled =~ "GPUI discarded a view update because rendering failed"
+    assert polled =~ "render failed"
+
+    sent =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, {:render_failed, _, _}} = GPUI.Runtime.send_view(runtime, 1, :ignored)
+      end)
+
+    assert sent =~ "GPUI discarded a view update because rendering failed"
+  end
+
   test "runtime retries authoritative snapshots after a display sync failure" do
     runtime =
       start_supervised!(

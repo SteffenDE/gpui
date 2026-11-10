@@ -26,6 +26,8 @@ defmodule GPUI.Runtime do
   use GenServer
   use GPUI.Display.FrameAPI
 
+  require Logger
+
   @call_timeout 5_000
   @event_history_limit 1_000
   @sync_retry_interval 50
@@ -306,6 +308,7 @@ defmodule GPUI.Runtime do
   def handle_call({:send_view, window_id, message}, _from, state) do
     state.session
     |> GPUI.Session.send_view(window_id, message)
+    |> log_update_failure()
     |> synchronized_snapshot_reply(state)
   end
 
@@ -400,8 +403,12 @@ defmodule GPUI.Runtime do
 
     state =
       case drain_display_events(state) do
-        {:ok, _handled, state} -> state
-        {:error, _reason, state} -> state
+        {:ok, _handled, state} ->
+          state
+
+        {:error, reason, state} ->
+          log_update_failure({:error, reason})
+          state
       end
 
     schedule_poll(state)
@@ -448,6 +455,37 @@ defmodule GPUI.Runtime do
 
   defp synchronized_snapshot_reply({:error, _reason} = error, state),
     do: {:reply, error, state}
+
+  defp log_update_failure({:error, {:render_failed, reason, stacktrace}} = result) do
+    Logger.error(
+      "GPUI discarded a view update because rendering failed:\n" <>
+        Exception.format(:error, reason, stacktrace)
+    )
+
+    result
+  end
+
+  defp log_update_failure(
+         {:error, {:callback_failed, module, callback, reason, stacktrace}} = result
+       ) do
+    Logger.error(
+      "GPUI discarded a view update because #{inspect(module)}.#{callback} failed:\n" <>
+        Exception.format(:error, reason, stacktrace)
+    )
+
+    result
+  end
+
+  defp log_update_failure({:error, {:invalid_callback_return, module, callback, value}} = result) do
+    Logger.error(
+      "GPUI discarded a view update because #{inspect(module)}.#{callback} returned " <>
+        inspect(value, limit: 5, printable_limit: 200)
+    )
+
+    result
+  end
+
+  defp log_update_failure(result), do: result
 
   defp drain_display_events(state) do
     case GPUI.Display.Support.drain(state.display_module, state.display) do

@@ -489,6 +489,7 @@ defmodule GPUI.Runtime do
 
   defp drain_display_events(state) do
     case GPUI.Display.Support.drain(state.display_module, state.display) do
+      {:ok, []} -> {:ok, [], state}
       {:ok, events} -> apply_display_events(state, events)
       {:error, reason} -> {:error, {:display_drain_failed, reason}, state}
     end
@@ -500,9 +501,6 @@ defmodule GPUI.Runtime do
       {:error, reason} -> {:error, reason, state}
     end
   end
-
-  defp synchronize_display_events(state, [], handled, _snapshot),
-    do: {:ok, handled, record_events(state, handled)}
 
   defp synchronize_display_events(state, _events, handled, snapshot) do
     state = record_events(state, handled)

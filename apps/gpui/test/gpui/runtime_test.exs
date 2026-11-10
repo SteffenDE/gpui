@@ -704,6 +704,27 @@ defmodule GPUI.RuntimeTest do
     assert sent =~ "GPUI discarded a view update because rendering failed"
   end
 
+  test "polling with no display events does not render" do
+    key = {RenderFailureView, :fail?}
+    :persistent_term.put(key, false)
+    on_exit(fn -> :persistent_term.erase(key) end)
+
+    runtime =
+      start_supervised!(
+        {GPUI.Runtime, app: RenderFailureApp, display: GPUI.Test.Display, poll_interval: nil}
+      )
+
+    :persistent_term.put(key, true)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        send(runtime, :poll_display)
+        :sys.get_state(runtime)
+      end)
+
+    assert log == ""
+  end
+
   test "runtime retries authoritative snapshots after a display sync failure" do
     runtime =
       start_supervised!(

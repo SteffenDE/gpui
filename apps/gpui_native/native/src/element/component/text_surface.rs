@@ -27,8 +27,11 @@ impl std::fmt::Debug for TextSurfaceNode {
             .field("show_whitespaces", &self.show_whitespaces)
             .field("tab_size", &self.tab_size)
             .field("hard_tabs", &self.hard_tabs)
+            .field("line_numbers", &self.line_numbers)
             .field("submit", &self.submit)
             .field("transaction", &self.transaction)
+            .field("keystroke", &self.keystroke)
+            .field("keyrelease", &self.keyrelease)
             .field("selection_change", &self.selection_change)
             .field("viewport_change", &self.viewport_change)
             .field("geometry_change", &self.geometry_change)
@@ -38,17 +41,19 @@ impl std::fmt::Debug for TextSurfaceNode {
 
 #[cfg(feature = "components")]
 #[derive(Clone)]
-struct SelectionSync {
+struct SurfaceSync {
     state: gpui::Entity<gpui_component::input::InputState>,
     buffer: rustler::ResourceArc<crate::TextBufferResource>,
     runtime: crate::SharedRuntime,
     window_id: u64,
     event_revision: std::sync::Arc<std::sync::atomic::AtomicU64>,
     selection_event: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    transaction_event: std::sync::Arc<std::sync::Mutex<Option<String>>>,
+    surface_id: String,
 }
 
 #[cfg(feature = "components")]
-impl SelectionSync {
+impl SurfaceSync {
     fn run(&self, cx: &mut gpui::App) {
         let state = self.state.read(cx);
         let text = state.value().to_string();
@@ -58,16 +63,53 @@ impl SelectionSync {
         let Ok(snapshot) = self.buffer.snapshot() else {
             return;
         };
-        if snapshot.selections == [selection.clone()] {
+        // An external buffer transaction must be rendered before native state
+        // can write back. In particular, a pending key-up must not undo it.
+        if snapshot.revision
+            != self
+                .event_revision
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
             return;
         }
-        let revision = match self
-            .buffer
-            .update_selection_from_surface(snapshot.revision, selection.clone())
-        {
-            Ok(revision) => revision,
-            Err(crate::TextBufferError::NoChange) => return,
-            Err(_error) => return,
+        // InputState undo/redo changes text silently, without InputEvent::Change.
+        let revision = if snapshot.text != text {
+            let Ok((transaction, revision)) = self.buffer.replace_from_surface(
+                snapshot.revision,
+                next_native_transaction_id(&self.surface_id),
+                text,
+                selection.clone(),
+            ) else {
+                return;
+            };
+            if let Some(event) = self
+                .transaction_event
+                .lock()
+                .ok()
+                .and_then(|event| event.clone())
+            {
+                let _ = push_event(
+                    &self.runtime,
+                    NativeEvent::Transaction {
+                        window_id: self.window_id,
+                        event,
+                        transaction,
+                        revision,
+                    },
+                );
+            }
+            revision
+        } else {
+            if snapshot.selections == [selection.clone()] {
+                return;
+            }
+            match self
+                .buffer
+                .update_selection_from_surface(snapshot.revision, selection.clone())
+            {
+                Ok(revision) => revision,
+                Err(_) => return,
+            }
         };
         self.event_revision
             .store(revision, std::sync::atomic::Ordering::Release);
@@ -112,6 +154,7 @@ pub(crate) struct ComponentTextSurface {
     pub(crate) focus_event: Option<String>,
     pub(crate) blur_event: Option<String>,
     pub(crate) auto_grow: bool,
+    pub(crate) line_numbers: bool,
     pub(crate) min_lines: u64,
     pub(crate) max_lines: u64,
     pub(crate) submit_policy: String,
@@ -158,29 +201,26 @@ pub(crate) fn render(
         let surface_id = node.id.clone();
         let event_surface_id = surface_id.clone();
         let state = context.cx.new(|cx| {
-            if node.auto_grow {
+            let state = if node.line_numbers {
+                InputState::new(context.window, cx)
+                    .code_editor("plain")
+                    .folding(false)
+                    .searchable(false)
+            } else if node.auto_grow {
                 InputState::new(context.window, cx)
                     .auto_grow(node.min_lines as usize, node.max_lines as usize)
-                    .soft_wrap(node.soft_wrap)
-                    .submit_on_enter(node.submit_policy == "submit")
-                    .show_whitespaces(node.show_whitespaces)
-                    .tab_size(TabSize {
-                        tab_size: node.tab_size as usize,
-                        hard_tabs: node.hard_tabs,
-                    })
-                    .default_value(snapshot.text.clone())
             } else {
-                InputState::new(context.window, cx)
-                    .multi_line(true)
-                    .soft_wrap(node.soft_wrap)
-                    .submit_on_enter(node.submit_policy == "submit")
-                    .show_whitespaces(node.show_whitespaces)
-                    .tab_size(TabSize {
-                        tab_size: node.tab_size as usize,
-                        hard_tabs: node.hard_tabs,
-                    })
-                    .default_value(snapshot.text.clone())
-            }
+                InputState::new(context.window, cx).multi_line(true)
+            };
+            state
+                .soft_wrap(node.soft_wrap)
+                .submit_on_enter(node.submit_policy == "submit")
+                .show_whitespaces(node.show_whitespaces)
+                .tab_size(TabSize {
+                    tab_size: node.tab_size as usize,
+                    hard_tabs: node.hard_tabs,
+                })
+                .default_value(snapshot.text.clone())
         });
         let transaction_event =
             std::sync::Arc::new(std::sync::Mutex::new(node.transaction.clone()));
@@ -297,6 +337,7 @@ pub(crate) fn render(
                 focus_event: node.focus.clone(),
                 blur_event: node.blur.clone(),
                 auto_grow: node.auto_grow,
+                line_numbers: node.line_numbers,
                 min_lines: node.min_lines,
                 max_lines: node.max_lines,
                 submit_policy: node.submit_policy.clone(),
@@ -331,10 +372,6 @@ pub(crate) fn render(
     surface.range_geometry_event = node.range_geometry_change.clone();
     surface.hit_test_event = node.hit_test.clone();
     surface.update_focus_events(node.focus.clone(), node.blur.clone());
-    surface.style_runs.set(
-        shaping_decorations(&surface.text, &node.style_runs),
-        context.cx,
-    );
 
     let focus_handle = surface.state_focus_handle(context.cx);
     if node.focus.is_some() || node.blur.is_some() {
@@ -360,7 +397,8 @@ pub(crate) fn render(
         }
     }
 
-    let mode_changed = surface.auto_grow != node.auto_grow
+    let mode_changed = surface.line_numbers != node.line_numbers
+        || surface.auto_grow != node.auto_grow
         || surface.min_lines != node.min_lines
         || surface.max_lines != node.max_lines
         || surface.submit_policy != node.submit_policy;
@@ -402,6 +440,11 @@ pub(crate) fn render(
             }
         }
     }
+
+    surface.style_runs.set(
+        shaping_decorations(&surface.text, &node.style_runs),
+        context.cx,
+    );
 
     let current_range = surface.state.read(context.cx).selected_range();
     if current_range != surface.selected_range {
@@ -458,20 +501,36 @@ pub(crate) fn render(
     let focus = surface.state.focus_handle(context.cx);
     if request_focus && node.focus_request > 0 {
         crate::element::focus_after_frame(focus.clone(), context.window, context.cx);
+        // Initial selections are installed before InputState has layout bounds.
+        // Reapply after the first frame so its native caret reveal can run.
+        let state = surface.state.clone();
+        context.window.on_next_frame(move |_window, cx| {
+            state.update(cx, |state, cx| {
+                let range = state.selected_range();
+                state.set_selected_range(range, cx);
+            });
+        });
     }
 
     let decoration_quads =
         decoration_quads(&surface.state, &surface.text, &node.decorations, context.cx);
 
-    let selection_sync = SelectionSync {
+    let selection_sync = SurfaceSync {
         state: surface.state.clone(),
         buffer: node.buffer.clone(),
         runtime: context.runtime.clone(),
         window_id: context.window_id,
         event_revision: surface.event_revision.clone(),
         selection_event: surface.selection_event.clone(),
+        transaction_event: surface.transaction_event.clone(),
+        surface_id: surface_id.clone(),
     };
     let mouse_selection_sync = selection_sync.clone();
+    let key_down = node.keystroke.clone();
+    let down_runtime = context.runtime.clone();
+    let key_release = node.keyrelease.clone();
+    let key_runtime = context.runtime.clone();
+    let key_window_id = context.window_id;
 
     let hit_state = surface.state.clone();
     let hit_runtime = context.runtime.clone();
@@ -540,7 +599,29 @@ pub(crate) fn render(
         .relative()
         .id(format!("text-surface-{surface_id}"))
         .track_focus(&focus.tab_stop(!node.disabled))
-        .on_key_up(move |_event, _window, cx| selection_sync.run(cx))
+        .capture_key_down(move |event, _, _| {
+            if let Some(name) = &key_down {
+                crate::element::event::emit_structured_key(
+                    &down_runtime,
+                    key_window_id,
+                    name,
+                    &event.keystroke,
+                    event.is_held,
+                );
+            }
+        })
+        .on_key_up(move |event, _window, cx| {
+            selection_sync.run(cx);
+            if let Some(name) = &key_release {
+                crate::element::event::emit_structured_key(
+                    &key_runtime,
+                    key_window_id,
+                    name,
+                    &event.keystroke,
+                    false,
+                );
+            }
+        })
         .on_mouse_up(gpui::MouseButton::Left, move |_event, _window, cx| {
             mouse_selection_sync.run(cx);
             if let Some(event_name) = &hit_event {

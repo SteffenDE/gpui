@@ -29,6 +29,20 @@ defmodule GPUI.Native.TestDriver do
   )
 
   (
+    @doc "Double-clicks a target in a deterministic native-test session."
+    def double_click(id, target) do
+      GPUI.Native.Backend.native_test_double_click(id, target)
+    end
+  )
+
+  (
+    @doc "Sends a native pinch gesture in a deterministic native-test session."
+    def pinch(id, target, delta, phase) do
+      GPUI.Native.Backend.native_test_pinch(id, target, delta, phase)
+    end
+  )
+
+  (
     @doc "Drags between logical points in a deterministic native-test session."
     def drag(id, from_x, from_y, to_x, to_y) do
       GPUI.Native.Backend.native_test_drag(id, from_x, from_y, to_x, to_y)

@@ -1,5 +1,5 @@
 defmodule GPUI.Test.Native.TerminalTest do
-  use GPUI.Test, native: [size: {480, 240}]
+  use GPUI.Test, native: [size: {480, 340}]
 
   defmodule View do
     use GPUI.View

@@ -1,3 +1,10 @@
+#[cfg(feature = "components")]
+mod hover;
+#[cfg(feature = "components")]
+mod tabs;
+#[cfg(feature = "components")]
+use tabs::{RichLayout, TabLayout};
+
 use crate::element::ElementRenderContext;
 #[cfg(feature = "components")]
 use crate::RichTextRunNode;
@@ -17,8 +24,13 @@ use std::sync::{Arc, Mutex};
 pub(crate) struct ComponentRichText {
     selection: Arc<Mutex<RichSelection>>,
     active_link: Arc<Mutex<Option<usize>>>,
+    hover: Arc<Mutex<hover::State>>,
     focus_handle: gpui::FocusHandle,
     text: String,
+    reveal_handled: Arc<Mutex<Option<(u64, u64, u64)>>>,
+    reveal_group: Option<String>,
+    hit_test_handled: Arc<Mutex<u64>>,
+    range_geometry: Arc<Mutex<Option<RangeGeometryKey>>>,
 }
 
 #[cfg(feature = "components")]
@@ -27,8 +39,13 @@ impl ComponentRichText {
         Self {
             selection: Arc::new(Mutex::new(RichSelection::default())),
             active_link: Arc::new(Mutex::new(None)),
+            hover: Arc::new(Mutex::new(Default::default())),
             focus_handle: cx.focus_handle(),
             text: String::new(),
+            reveal_handled: Arc::new(Mutex::new(None)),
+            reveal_group: None,
+            hit_test_handled: Arc::new(Mutex::new(0)),
+            range_geometry: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -62,6 +79,29 @@ struct NativeRichRun {
 }
 
 #[cfg(feature = "components")]
+struct HorizontalReveal {
+    range: Range<usize>,
+    key: (u64, u64, u64),
+    handled: Arc<Mutex<Option<(u64, u64, u64)>>>,
+}
+
+#[cfg(feature = "components")]
+struct HitTest {
+    point: gpui::Point<gpui::Pixels>,
+    request: u64,
+    event: String,
+    handled: Arc<Mutex<u64>>,
+}
+
+#[cfg(feature = "components")]
+#[derive(PartialEq)]
+struct RangeGeometryKey {
+    event: String,
+    ranges: Vec<crate::TextRange>,
+    rectangles: Vec<Vec<(u32, u32, u32, u32)>>,
+}
+
+#[cfg(feature = "components")]
 struct RichTextElement {
     id: String,
     label: String,
@@ -71,9 +111,22 @@ struct RichTextElement {
     selection: Arc<Mutex<RichSelection>>,
     active_link: Arc<Mutex<Option<usize>>>,
     link_event: Option<String>,
+    hover_event: Option<String>,
+    hover: Arc<Mutex<hover::State>>,
+    selection_event: Option<String>,
     runtime: crate::SharedRuntime,
     window_id: u64,
     styled_text: gpui::StyledText,
+    tabbed: Option<TabLayout>,
+    tab_size: usize,
+    snap_line_height: bool,
+    horizontal: Option<super::horizontal::Binding>,
+    horizontal_extra: f32,
+    horizontal_reveal: Option<HorizontalReveal>,
+    hit_test: Option<HitTest>,
+    geometry_ranges: Vec<crate::TextRange>,
+    geometry_event: Option<String>,
+    range_geometry: Arc<Mutex<Option<RangeGeometryKey>>>,
 }
 
 #[cfg(feature = "components")]
@@ -82,6 +135,7 @@ impl RichTextElement {
         node: &RichTextComponentNode,
         selection: Arc<Mutex<RichSelection>>,
         active_link: Arc<Mutex<Option<usize>>>,
+        hover: Arc<Mutex<hover::State>>,
         runtime: crate::SharedRuntime,
         window_id: u64,
     ) -> Self {
@@ -96,9 +150,85 @@ impl RichTextElement {
             selection,
             active_link,
             link_event: node.link.clone(),
+            hover_event: node.link_hover.clone(),
+            hover,
+            selection_event: node.change.clone(),
             runtime,
             window_id,
             styled_text: gpui::StyledText::new(text),
+            tabbed: None,
+            tab_size: node.tab_size as usize,
+            snap_line_height: node.line_height_snap.as_deref() != Some("none"),
+            horizontal: None,
+            horizontal_extra: 8.0,
+            horizontal_reveal: None,
+            hit_test: None,
+            geometry_ranges: node.geometry_ranges.clone(),
+            geometry_event: node.range_geometry.clone(),
+            range_geometry: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn report_range_geometry(&self, layout: &RichLayout, align: gpui::TextAlign) {
+        let Some(event) = &self.geometry_event else {
+            return;
+        };
+        let geometries: Vec<_> = self
+            .geometry_ranges
+            .iter()
+            .take(64)
+            .map(|range| {
+                let rectangles = crate::text_buffer::range_to_byte_range(&self.text, range)
+                    .ok()
+                    .map(|bytes| layout.rectangles_for_range(bytes, align))
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|rect| crate::TextRectangle {
+                        x: f32::from(rect.origin.x) as f64,
+                        y: f32::from(rect.origin.y) as f64,
+                        width: f32::from(rect.size.width) as f64,
+                        height: f32::from(rect.size.height) as f64,
+                    })
+                    .collect();
+                crate::TextRangeGeometry {
+                    range: range.clone(),
+                    rectangles,
+                }
+            })
+            .collect();
+        let key = RangeGeometryKey {
+            event: event.clone(),
+            ranges: geometries.iter().map(|g| g.range.clone()).collect(),
+            rectangles: geometries
+                .iter()
+                .map(|g| {
+                    g.rectangles
+                        .iter()
+                        .map(|r| {
+                            (
+                                (r.x as f32).to_bits(),
+                                (r.y as f32).to_bits(),
+                                (r.width as f32).to_bits(),
+                                (r.height as f32).to_bits(),
+                            )
+                        })
+                        .collect()
+                })
+                .collect(),
+        };
+        if let Ok(mut previous) = self.range_geometry.lock() {
+            if previous.as_ref() != Some(&key) {
+                *previous = Some(key);
+                let _ = crate::push_event(
+                    &self.runtime,
+                    crate::NativeEvent::RangeGeometry {
+                        window_id: self.window_id,
+                        event: event.clone(),
+                        value: geometries,
+                        revision: 0,
+                    },
+                );
+            }
         }
     }
 
@@ -159,7 +289,52 @@ impl gpui::Element for RichTextElement {
         cx: &mut gpui::App,
     ) -> (gpui::LayoutId, Self::RequestLayoutState) {
         let shaped_runs = shaped_runs(&window.text_style(), self.text.len(), &self.runs);
-        self.styled_text = gpui::StyledText::new(self.text.clone()).with_runs(shaped_runs);
+        if self.text.contains('\t') {
+            let tabs = TabLayout::with_line_height_snap(
+                self.text.clone(),
+                shaped_runs,
+                self.tab_size,
+                self.snap_line_height,
+                window,
+            );
+            if let Some(horizontal) = &self.horizontal {
+                horizontal.measured(tabs.unwrapped_width() + self.horizontal_extra, window, cx);
+            }
+            let layout = tabs.request_layout(window);
+            self.tabbed = Some(tabs);
+            return (layout, ());
+        }
+        self.tabbed = None;
+
+        if let Some(horizontal) = &self.horizontal {
+            let font_size = window.text_style().font_size.to_pixels(window.rem_size());
+            let width = if self.text.contains('\n') {
+                window
+                    .text_system()
+                    .shape_text(self.text.clone(), font_size, &shaped_runs, None, None)
+                    .map(|lines| {
+                        lines
+                            .iter()
+                            .map(|line| f32::from(line.unwrapped_layout.width))
+                            .fold(0.0_f32, f32::max)
+                    })
+                    .unwrap_or(0.0)
+            } else {
+                f32::from(
+                    window
+                        .text_system()
+                        .shape_line(self.text.clone(), font_size, &shaped_runs, None)
+                        .width,
+                )
+            };
+            horizontal.measured(width + self.horizontal_extra, window, cx);
+        }
+        let styled_text = gpui::StyledText::new(self.text.clone()).with_runs(shaped_runs);
+        self.styled_text = if self.snap_line_height {
+            styled_text
+        } else {
+            styled_text.with_fractional_line_height()
+        };
         let (layout_id, _) = self
             .styled_text
             .request_layout(global_id, inspector_id, window, cx);
@@ -175,8 +350,12 @@ impl gpui::Element for RichTextElement {
         window: &mut gpui::Window,
         cx: &mut gpui::App,
     ) -> Self::PrepaintState {
-        self.styled_text
-            .prepaint(global_id, inspector_id, bounds, &mut (), window, cx);
+        if let Some(tabs) = &self.tabbed {
+            tabs.prepaint(bounds);
+        } else {
+            self.styled_text
+                .prepaint(global_id, inspector_id, bounds, &mut (), window, cx);
+        }
         window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal)
     }
 
@@ -190,18 +369,195 @@ impl gpui::Element for RichTextElement {
         window: &mut gpui::Window,
         cx: &mut gpui::App,
     ) {
-        let layout = self.styled_text.layout().clone();
+        let layout = match &self.tabbed {
+            Some(tabs) => RichLayout::Tabbed(tabs.clone()),
+            None => RichLayout::Plain(self.styled_text.layout().clone()),
+        };
+        {
+            if let Some(query) = &self.hit_test {
+                if let Ok(mut handled) = query.handled.lock() {
+                    if *handled != query.request {
+                        let mut point = query.point;
+                        point.y = point
+                            .y
+                            .max(bounds.top())
+                            .min(bounds.bottom() - gpui::px(0.001));
+                        let index = if let Some(tabs) = &self.tabbed {
+                            tabs.closest_index_for_position(point)
+                        } else {
+                            let style = window.text_style();
+                            let font_size = style.font_size.to_pixels(window.rem_size());
+                            let line_height = style
+                                .line_height
+                                .to_pixels(font_size.into(), window.rem_size());
+                            let line_height = if self.snap_line_height {
+                                window.pixel_snap(line_height)
+                            } else {
+                                line_height
+                            };
+                            let runs = shaped_runs(&style, self.text.len(), &self.runs);
+                            let wrap = (style.white_space == gpui::WhiteSpace::Normal)
+                                .then_some(bounds.size.width);
+                            let lines = window
+                                .text_system()
+                                .shape_text(
+                                    self.text.clone(),
+                                    font_size,
+                                    &runs,
+                                    wrap,
+                                    style.line_clamp,
+                                )
+                                .unwrap_or_default();
+                            let mut offset = 0;
+                            let mut origin = bounds.origin;
+                            let mut result = self.text.len();
+                            for line in lines {
+                                let bottom = origin.y + line.size(line_height).height;
+                                if point.y < bottom {
+                                    let caret = nearest_caret(&line, point - origin, line_height);
+                                    result = offset + caret;
+                                    break;
+                                }
+                                offset += line.len() + 1;
+                                origin.y = bottom;
+                            }
+                            result
+                        };
+                        let index = clamp_byte_index(&self.text, index);
+                        let prefix = &self.text[..index];
+                        let line = prefix.bytes().filter(|byte| *byte == b'\n').count();
+                        let column = prefix
+                            .rsplit('\n')
+                            .next()
+                            .unwrap_or("")
+                            .encode_utf16()
+                            .count();
+                        let _ = crate::push_event(
+                            &self.runtime,
+                            crate::NativeEvent::Input {
+                                kind: crate::InputKind::Change,
+                                window_id: self.window_id,
+                                event: query.event.clone(),
+                                value: Some(crate::EventValue::Numbers(vec![
+                                    line as f64,
+                                    column as f64,
+                                ])),
+                            },
+                        );
+                        *handled = query.request;
+                    }
+                }
+            }
+        }
+        self.report_range_geometry(&layout, window.text_style().text_align);
+        if bounds.intersects(&window.content_mask().bounds) {
+            if let (Some(binding), Some(reveal)) = (&self.horizontal, &self.horizontal_reveal) {
+                let handled = reveal
+                    .handled
+                    .lock()
+                    .ok()
+                    .is_some_and(|value| *value == Some(reveal.key));
+                if !handled {
+                    if let (Some(start), Some(end)) = (
+                        layout.position_for_index(reveal.range.start),
+                        layout.position_for_index(reveal.range.end),
+                    ) {
+                        if binding.reveal_range(f32::from(start.x), f32::from(end.x), window, cx) {
+                            if let Ok(mut value) = reveal.handled.lock() {
+                                *value = Some(reveal.key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if let Ok(selection) = self.selection.lock() {
             paint_selection(&selection.range(), &layout, bounds, window);
         }
-        self.styled_text
-            .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
+        if let Some(tabs) = &self.tabbed {
+            tabs.paint(window, cx);
+        } else {
+            self.styled_text
+                .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
+        }
+
+        if let Some(event) = &self.hover_event {
+            let dragging = self
+                .selection
+                .lock()
+                .is_ok_and(|selection| selection.dragging);
+            hover::observe(
+                &self.hover,
+                event,
+                &self.id,
+                &self.runs,
+                &layout,
+                window.mouse_position(),
+                hitbox.is_hovered(window) && !dragging,
+                &self.runtime,
+                self.window_id,
+            );
+            window.on_mouse_event({
+                let state = self.hover.clone();
+                let event_name = event.clone();
+                let id = self.id.clone();
+                let runs = self.runs.clone();
+                let layout = layout.clone();
+                let hitbox = hitbox.clone();
+                let runtime = self.runtime.clone();
+                let window_id = self.window_id;
+                move |event: &gpui::MouseMoveEvent, phase, window, _cx| {
+                    if phase == gpui::DispatchPhase::Capture
+                        && hover::observe(
+                            &state,
+                            &event_name,
+                            &id,
+                            &runs,
+                            &layout,
+                            event.position,
+                            hitbox.is_hovered(window) && event.pressed_button.is_none(),
+                            &runtime,
+                            window_id,
+                        )
+                    {
+                        window.refresh();
+                    }
+                }
+            });
+            window.on_mouse_event({
+                let state = self.hover.clone();
+                let event_name = event.clone();
+                let id = self.id.clone();
+                let runs = self.runs.clone();
+                let layout = layout.clone();
+                let runtime = self.runtime.clone();
+                let window_id = self.window_id;
+                move |_event: &gpui::MouseExitEvent, phase, window, _cx| {
+                    if phase == gpui::DispatchPhase::Capture
+                        && hover::observe(
+                            &state,
+                            &event_name,
+                            &id,
+                            &runs,
+                            &layout,
+                            window.mouse_position(),
+                            false,
+                            &runtime,
+                            window_id,
+                        )
+                    {
+                        window.refresh();
+                    }
+                }
+            });
+        }
 
         if self.selectable {
             window.set_cursor_style(gpui::CursorStyle::IBeam, hitbox);
         }
         if let Ok(index) = layout.index_for_position(window.mouse_position()) {
-            if self.link_at(index).is_some() {
+            if self.link_event.is_some() && self.link_at(index).is_some() {
                 window.set_cursor_style(gpui::CursorStyle::PointingHand, hitbox);
             }
         }
@@ -250,13 +606,31 @@ impl gpui::Element for RichTextElement {
             let active_link = self.active_link.clone();
             let runs = self.runs.clone();
             let event_name = self.link_event.clone();
+            let selection_event = self.selection_event.clone();
+            let selection_text = self.text.clone();
             let runtime = self.runtime.clone();
             let window_id = self.window_id;
             move |event: &gpui::MouseUpEvent, phase, window, cx| {
-                if !phase.bubble()
-                    || event.button != gpui::MouseButton::Left
-                    || !hitbox.is_hovered(window)
-                {
+                if !phase.bubble() || event.button != gpui::MouseButton::Left {
+                    return;
+                }
+                let dragging = selection
+                    .lock()
+                    .map(|value| value.dragging)
+                    .unwrap_or(false);
+                if dragging {
+                    report_selection(
+                        &runtime,
+                        window_id,
+                        selection_event.as_deref(),
+                        &selection_text,
+                        &selection,
+                    );
+                }
+                if !hitbox.is_hovered(window) {
+                    if let Ok(mut value) = selection.lock() {
+                        value.dragging = false;
+                    }
                     return;
                 }
                 let selected = selection
@@ -281,7 +655,7 @@ impl gpui::Element for RichTextElement {
                     if let (Some(link), Some(event_name)) =
                         (run.source.link.as_deref(), event_name.as_deref())
                     {
-                        emit_link(&runtime, window_id, event_name, link);
+                        emit_link(&runtime, window_id, event_name, link, event.modifiers);
                         cx.stop_propagation();
                     }
                 }
@@ -334,7 +708,7 @@ impl gpui::Element for RichTextElement {
 
 #[cfg(feature = "components")]
 pub(crate) fn render(
-    node: RichTextComponentNode,
+    mut node: RichTextComponentNode,
     context: &mut ElementRenderContext<'_, '_>,
 ) -> gpui::AnyElement {
     use crate::element::apply_generated_render_styles;
@@ -348,12 +722,39 @@ pub(crate) fn render(
         .components
         .rich_text_mut(&node.id)
         .expect("rich text component must exist after insertion");
-    if let Ok(mut selection) = component.selection.lock() {
+    if component.text != node.text || component.reveal_group != node.scroll_group {
+        if let Ok(mut value) = component.reveal_handled.lock() {
+            *value = None;
+        }
+        component.reveal_group = node.scroll_group.clone();
+    }
+    let reveal_handled = component.reveal_handled.clone();
+    let hit_test_handled = component.hit_test_handled.clone();
+    let range_geometry = component.range_geometry.clone();
+
+    let selection_changed = if let Ok(mut selection) = component.selection.lock() {
+        let previous = component
+            .text
+            .get(selection.range())
+            .unwrap_or("")
+            .to_string();
         if !node.selectable {
             selection.clear();
         } else {
             reconcile_selection(&mut selection, &component.text, &node.text);
         }
+        previous != node.text.get(selection.range()).unwrap_or("")
+    } else {
+        false
+    };
+    if selection_changed {
+        report_selection(
+            &context.runtime,
+            context.window_id,
+            node.change.as_deref(),
+            &node.text,
+            &component.selection,
+        );
     }
     if let Ok(mut active_link) = component.active_link.lock() {
         let link_count = node.runs.iter().filter(|run| run.link.is_some()).count();
@@ -364,22 +765,98 @@ pub(crate) fn render(
     component.text.clone_from(&node.text);
     let selection = component.selection.clone();
     let active_link = component.active_link.clone();
+    let hover = component.hover.clone();
     let focus_handle = component.focus_handle.clone();
-    let text_element = RichTextElement::new(
+    let horizontal = super::horizontal::Binding::configure(&node, context);
+    let mut text_element = RichTextElement::new(
         &node,
         selection.clone(),
         active_link.clone(),
+        hover.clone(),
         context.runtime.clone(),
         context.window_id,
     );
-    let links = text_element.links();
+    let placement = node.scrollbar_placement.as_deref().unwrap_or("overlay");
+    let mut content_padding = [0.0; 4];
+    if horizontal.is_some() && placement != "overlay" {
+        let all = node.style.padding.take().unwrap_or(0.0);
+        let x = node.style.padding_x.take().unwrap_or(all);
+        let y = node.style.padding_y.take().unwrap_or(all);
+        content_padding = [
+            node.style.padding_top.take().unwrap_or(y),
+            node.style.padding_right.take().unwrap_or(x),
+            node.style.padding_bottom.take().unwrap_or(y),
+            node.style.padding_left.take().unwrap_or(x),
+        ];
+    }
+    // Outside tracks follow an overflowing block's painted text extent. The
+    // leading inset contributes to overflow; the trailing inset is inside the
+    // block and does not add a blank tail after an unwrapped physical line.
+    text_element.horizontal_extra = node.scroll_padding.max(0.0) as f32
+        + content_padding[3]
+        + if placement == "outside" {
+            0.0
+        } else {
+            content_padding[1]
+        };
+    text_element.horizontal = horizontal.clone();
+    text_element.range_geometry = range_geometry;
+    if let (Some(x), Some(y), Some(event)) =
+        (node.hit_test_x, node.hit_test_y, node.hit_test.as_ref())
+    {
+        if node.hit_test_request > 0 {
+            text_element.hit_test = Some(HitTest {
+                point: gpui::point(gpui::px(x as f32), gpui::px(y as f32)),
+                request: node.hit_test_request,
+                event: event.clone(),
+                handled: hit_test_handled,
+            });
+        }
+    }
+    if let (Some(first), Some(last)) = (node.reveal_start, node.reveal_end) {
+        if let (Some(start), Some(end)) = (
+            text_position_to_byte(
+                &node.text,
+                &TextPosition {
+                    line: 0,
+                    utf16_offset: first,
+                },
+            ),
+            text_position_to_byte(
+                &node.text,
+                &TextPosition {
+                    line: 0,
+                    utf16_offset: last,
+                },
+            ),
+        ) {
+            text_element.horizontal_reveal = Some(HorizontalReveal {
+                range: start..end,
+                key: (first, last, node.reveal_request),
+                handled: reveal_handled,
+            });
+        }
+    }
+    let links = if node.link.is_some() {
+        text_element.links()
+    } else {
+        Vec::new()
+    };
     let copy_element = RichTextElement::new(
         &node,
         selection.clone(),
         active_link.clone(),
+        hover,
         context.runtime.clone(),
         context.window_id,
     );
+    let selection_runtime = context.runtime.clone();
+    let selection_window = context.window_id;
+    let selection_event = node.change.clone();
+    let selection_text = node.text.clone();
+    let outside_runtime = selection_runtime.clone();
+    let outside_event = selection_event.clone();
+    let outside_text = selection_text.clone();
     let selection_for_keyboard = selection.clone();
     let selection_for_outside = selection;
     let link_count = links.len();
@@ -389,36 +866,96 @@ pub(crate) fn render(
     let link_event = node.link.clone();
     let link_window_id = context.window_id;
     let keyboard_text_len = node.text.len();
+    let selectable = node.selectable;
 
     let focus_for_pointer = focus_handle.clone();
 
-    apply_generated_render_styles(gpui::div(), node.style)
+    let viewport_id = node.id.clone();
+    let debug_id = node.id.clone();
+    let scrollbar = super::horizontal::ScrollbarOptions {
+        enabled: node.scrollbar,
+        overlay: placement != "gutter",
+        outside: placement == "outside",
+        content_padding,
+        visible: node.scrollbar_visible,
+        gutter: node.scrollbar_gutter as f32,
+        // Only overlay bars can be standalone controls. Empty code blocks
+        // in gutter/outside mode still own their content padding.
+        only: placement == "overlay" && node.scrollbar && node.text.is_empty(),
+        color: node.style.color,
+    };
+    let horizontal_key = horizontal.clone();
+    let base = apply_generated_render_styles(gpui::div(), node.style)
         .id(node.id)
+        .debug_selector(move || debug_id.clone())
         .track_focus(&focus_handle.tab_stop(link_count > 0))
-        .focus_visible(|style| style.border_2().border_color(gpui::rgb(0x60a5fa)))
+        .focus_visible(move |style| {
+            if link_count > 0 {
+                style.border_2().border_color(gpui::rgb(0x60a5fa))
+            } else {
+                style
+            }
+        })
         .on_mouse_down(gpui::MouseButton::Left, move |_event, window, cx| {
-            focus_for_pointer.focus(window, cx);
+            if selectable || link_count > 0 {
+                focus_for_pointer.focus(window, cx);
+            }
         })
         .on_mouse_down_out(move |_event, window, _cx| {
+            let had_selection = selection_for_outside
+                .lock()
+                .map(|value| !value.range().is_empty())
+                .unwrap_or(false);
             if let Ok(mut selection) = selection_for_outside.lock() {
                 selection.clear();
+            }
+            if had_selection {
+                report_selection(
+                    &outside_runtime,
+                    selection_window,
+                    outside_event.as_deref(),
+                    &outside_text,
+                    &selection_for_outside,
+                );
             }
             window.refresh();
         })
         .on_key_down(move |event, window, cx| {
+            if link_count == 0
+                && horizontal_key
+                    .as_ref()
+                    .is_some_and(|binding| binding.key(event, window, cx))
+            {
+                cx.stop_propagation();
+                return;
+            }
             let key = event.keystroke.key.as_str();
-            if key == "a" && event.keystroke.modifiers.secondary() {
+            if key == "a" && event.keystroke.modifiers.secondary() && selectable {
                 if let Ok(mut selection) = selection_for_keyboard.lock() {
                     selection.anchor = 0;
                     selection.head = keyboard_text_len;
                     selection.dragging = false;
                 }
+                report_selection(
+                    &selection_runtime,
+                    selection_window,
+                    selection_event.as_deref(),
+                    &selection_text,
+                    &selection_for_keyboard,
+                );
                 window.refresh();
                 cx.stop_propagation();
             } else if key == "escape" {
                 if let Ok(mut selection) = selection_for_keyboard.lock() {
                     selection.clear();
                 }
+                report_selection(
+                    &selection_runtime,
+                    selection_window,
+                    selection_event.as_deref(),
+                    &selection_text,
+                    &selection_for_keyboard,
+                );
                 window.refresh();
                 cx.stop_propagation();
             } else if matches!(key, "enter" | "space") {
@@ -428,7 +965,13 @@ pub(crate) fn render(
                     .and_then(|active| active.or((link_count > 0).then_some(0)));
                 if let (Some(index), Some(event_name)) = (index, link_event.as_deref()) {
                     if let Some((_range, link)) = keyboard_links.get(index) {
-                        emit_link(&link_runtime, link_window_id, event_name, link);
+                        emit_link(
+                            &link_runtime,
+                            link_window_id,
+                            event_name,
+                            link,
+                            event.keystroke.modifiers,
+                        );
                         cx.stop_propagation();
                     }
                 }
@@ -447,9 +990,19 @@ pub(crate) fn render(
                     cx.stop_propagation();
                 }
             }
-        })
-        .child(text_element)
-        .into_any_element()
+        });
+    if let Some(horizontal) = horizontal {
+        // An empty block has no physical text line. Keep the viewport padding
+        // but avoid StyledText's default empty-line height in block modes.
+        let content = if node.text.is_empty() && placement != "overlay" {
+            gpui::div().h_0().into_any_element()
+        } else {
+            text_element.into_any_element()
+        };
+        horizontal.viewport_element(viewport_id, base, content, scrollbar)
+    } else {
+        base.child(text_element).into_any_element()
+    }
 }
 
 #[cfg(feature = "components")]
@@ -463,20 +1016,105 @@ fn next_link_index(key: &str, active: Option<usize>, link_count: usize) -> usize
 }
 
 #[cfg(feature = "components")]
-fn emit_link(runtime: &crate::SharedRuntime, window_id: u64, event: &str, link: &str) {
+fn report_selection(
+    runtime: &crate::SharedRuntime,
+    window_id: u64,
+    event: Option<&str>,
+    text: &str,
+    selection: &Arc<Mutex<RichSelection>>,
+) {
+    let Some(event) = event else {
+        return;
+    };
+    let value = selection
+        .lock()
+        .ok()
+        .and_then(|value| text.get(value.range()).map(str::to_string))
+        .unwrap_or_default();
     let _ = crate::push_event(
         runtime,
         crate::NativeEvent::Input {
-            kind: crate::InputKind::Link,
+            kind: crate::InputKind::Change,
             window_id,
             event: event.to_string(),
-            value: Some(crate::EventValue::String(link.to_string())),
+            value: Some(crate::EventValue::String(value)),
         },
     );
 }
 
 #[cfg(feature = "components")]
-fn closest_index(layout: &gpui::TextLayout, position: gpui::Point<gpui::Pixels>) -> usize {
+fn emit_link(
+    runtime: &crate::SharedRuntime,
+    window_id: u64,
+    event: &str,
+    link: &str,
+    modifiers: gpui::Modifiers,
+) {
+    let value = Some(crate::EventValue::String(link.to_string()));
+    let event = if modifiers.control || modifiers.alt || modifiers.shift || modifiers.platform {
+        crate::NativeEvent::ModifiedInput {
+            kind: crate::InputKind::Link,
+            window_id,
+            event: event.to_string(),
+            value,
+            control: modifiers.control,
+            alt: modifiers.alt,
+            shift: modifiers.shift,
+            platform: modifiers.platform,
+        }
+    } else {
+        crate::NativeEvent::Input {
+            kind: crate::InputKind::Link,
+            window_id,
+            event: event.to_string(),
+            value,
+        }
+    };
+    let _ = crate::push_event(runtime, event);
+}
+
+#[cfg(feature = "components")]
+fn nearest_caret(
+    line: &gpui::WrappedLine,
+    point: gpui::Point<gpui::Pixels>,
+    height: gpui::Pixels,
+) -> usize {
+    let row = ((f32::from(point.y) / f32::from(height).max(0.01)).max(0.0) as usize)
+        .min(line.wrap_boundaries.len());
+    let boundary = |row: usize| {
+        let boundary = &line.wrap_boundaries[row];
+        let glyph = &line.unwrapped_layout.runs[boundary.run_ix].glyphs[boundary.glyph_ix];
+        (glyph.index, glyph.position.x)
+    };
+    let (first, origin) = if row == 0 {
+        (0, gpui::px(0.0))
+    } else {
+        boundary(row - 1)
+    };
+    let (last, end) = if row < line.wrap_boundaries.len() {
+        boundary(row)
+    } else {
+        (line.len(), line.unwrapped_layout.width)
+    };
+    let x = point.x + origin;
+    line.unwrapped_layout
+        .runs
+        .iter()
+        .flat_map(|run| &run.glyphs)
+        .filter(|glyph| glyph.index >= first && glyph.index < last)
+        .map(|glyph| (glyph.index, glyph.position.x))
+        .chain(std::iter::once((last, end)))
+        .min_by(|(left_index, left), (right_index, right)| {
+            f32::from((*left - x).abs())
+                .total_cmp(&f32::from((*right - x).abs()))
+                .then_with(|| right_index.cmp(left_index))
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(first)
+}
+
+#[cfg(feature = "components")]
+fn closest_index(layout: &RichLayout, position: gpui::Point<gpui::Pixels>) -> usize {
     match layout.index_for_position(position) {
         Ok(index) | Err(index) => index,
     }
@@ -600,7 +1238,14 @@ fn apply_run_style(run: &mut gpui::TextRun, source: &RichTextRunNode) {
     if let Some(color) = source.color {
         run.color = gpui::rgb(color).into();
     }
-    run.background_color = source.background.map(|color| gpui::rgb(color).into());
+    run.background_color = source.background.map(|color| {
+        let mut color: gpui::Hsla = gpui::rgb(color).into();
+        color.a = source.background_opacity.unwrap_or(1.0) as f32;
+        color
+    });
+    if let Some(family) = &source.font_family {
+        run.font.family = family.clone().into();
+    }
     run.font.weight = match source.font_weight.as_deref() {
         Some("thin") => gpui::FontWeight::THIN,
         Some("extra_light") => gpui::FontWeight::EXTRA_LIGHT,
@@ -689,7 +1334,7 @@ fn selection_rectangles(
 #[cfg(feature = "components")]
 fn paint_selection(
     selection: &Range<usize>,
-    layout: &gpui::TextLayout,
+    layout: &RichLayout,
     bounds: gpui::Bounds<gpui::Pixels>,
     window: &mut gpui::Window,
 ) {
@@ -731,6 +1376,33 @@ pub(crate) fn render(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "components")]
+    #[test]
+    fn link_events_preserve_modifiers_without_changing_the_link_value() {
+        let runtime = std::sync::Arc::new(crate::runtime::RuntimeState::new());
+        super::emit_link(
+            &runtime,
+            7,
+            "open",
+            "opaque-link",
+            crate::gpui::Modifiers {
+                platform: true,
+                shift: true,
+                ..Default::default()
+            },
+        );
+        super::emit_link(&runtime, 7, "open", "plain-link", Default::default());
+        let events = runtime.events.lock().unwrap();
+        assert!(matches!(&events[0], crate::NativeEvent::ModifiedInput {
+            kind: crate::InputKind::Link, window_id: 7, event,
+            value: Some(crate::EventValue::String(link)), platform: true, shift: true,
+            control: false, alt: false,
+        } if event == "open" && link == "opaque-link"));
+        assert!(matches!(&events[1], crate::NativeEvent::Input {
+            kind: crate::InputKind::Link, value: Some(crate::EventValue::String(link)), ..
+        } if link == "plain-link"));
+    }
+
     use super::*;
 
     #[test]
@@ -770,6 +1442,26 @@ mod tests {
     }
 
     #[test]
+    fn background_opacity_survives_native_shaping_without_affecting_ranges() {
+        let base = gpui::TextStyle::default();
+        let runs = vec![NativeRichRun {
+            range: 0..3,
+            source: rich_run(0, 3, |run| {
+                run.background = Some(0xF06E64);
+                run.background_opacity = Some(0.2);
+            }),
+        }];
+        let shaped = shaped_runs(&base, 5, &runs);
+        assert_eq!(shaped.iter().map(|run| run.len).collect::<Vec<_>>(), [3, 2]);
+        let color = shaped[0].background_color.expect("translucent background");
+        assert_eq!(color.a, 0.2);
+        let mut opaque: gpui::Hsla = gpui::rgb(0xF06E64).into();
+        opaque.a = 0.2;
+        assert_eq!(color, opaque);
+        assert_eq!(shaped[1].background_color, None);
+    }
+
+    #[test]
     fn shaped_runs_cover_default_gaps_and_supported_run_styles() {
         let base = gpui::TextStyle::default();
         let runs = vec![
@@ -778,6 +1470,7 @@ mod tests {
                 source: rich_run(1, 3, |run| {
                     run.color = Some(0x112233);
                     run.background = Some(0x445566);
+                    run.font_family = Some("Run Mono".to_string());
                     run.font_weight = Some("bold".to_string());
                     run.font_style = Some("italic".to_string());
                     run.underline = Some(0x778899);
@@ -802,6 +1495,8 @@ mod tests {
             [1, 2, 2, 2, 1]
         );
         assert_eq!(shaped.iter().map(|run| run.len).sum::<usize>(), 8);
+        assert_eq!(shaped[1].font.family.as_ref(), "Run Mono");
+        assert_eq!(shaped[3].font.family, base.font_family);
         assert_eq!(shaped[1].font.weight, gpui::FontWeight::BOLD);
         assert_eq!(shaped[1].font.style, gpui::FontStyle::Italic);
         assert_eq!(shaped[1].color, gpui::rgb(0x112233).into());
@@ -840,6 +1535,8 @@ mod tests {
             },
             color: None,
             background: None,
+            background_opacity: None,
+            font_family: None,
             font_weight: None,
             font_style: None,
             underline: None,

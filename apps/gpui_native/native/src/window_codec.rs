@@ -15,3 +15,11 @@ pub(crate) fn lifecycle_focus() -> Lifecycle {
 pub(crate) fn lifecycle_blur() -> Lifecycle {
     Lifecycle::Blur
 }
+
+pub(crate) fn lifecycle_appearance() -> Lifecycle {
+    Lifecycle::Appearance
+}
+
+pub(crate) fn lifecycle_geometry() -> Lifecycle {
+    Lifecycle::Geometry
+}

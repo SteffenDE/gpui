@@ -2,7 +2,9 @@ defmodule GPUI.Text.RichRun do
   @moduledoc """
   A neutral shaping run for immutable rich text.
 
-  The half-open `range` uses zero-based `{line, utf16_offset}` positions. Runs
+  The half-open `range` uses zero-based `{line, utf16_offset}` positions.
+  `background_opacity` optionally blends its RGB background with the surface,
+  from zero to one (default opaque), and requires `background`. Runs
   carry renderer facts only; Markdown, syntax, diagnostics, and product policy
   remain consumer-owned. `link` is an opaque bounded application value emitted
   through the rich text component's ordinary link event.
@@ -19,6 +21,8 @@ defmodule GPUI.Text.RichRun do
     :range,
     :color,
     :background,
+    :background_opacity,
+    :font_family,
     :font_weight,
     :font_style,
     :underline,
@@ -33,6 +37,8 @@ defmodule GPUI.Text.RichRun do
           range: Range.t(),
           color: rgb() | nil,
           background: rgb() | nil,
+          background_opacity: number() | nil,
+          font_family: String.t() | nil,
           font_weight: atom() | nil,
           font_style: atom() | nil,
           underline: rgb() | nil,
@@ -52,6 +58,7 @@ defmodule GPUI.Text.RichRun do
   @spec validate!(t()) :: :ok
   def validate!(%__MODULE__{} = run) do
     validate_colors!(run)
+    validate_background_opacity!(run)
     validate_font!(run)
     validate_underline!(run)
     validate_link!(run.link)
@@ -66,7 +73,26 @@ defmodule GPUI.Text.RichRun do
         &validate_color!/1
       )
 
+  defp validate_background_opacity!(%{background_opacity: nil}), do: :ok
+
+  defp validate_background_opacity!(%{background: nil}),
+    do: raise(ArgumentError, "rich run background_opacity requires background")
+
+  defp validate_background_opacity!(%{background_opacity: alpha})
+       when is_number(alpha) and alpha >= 0 and alpha <= 1, do: :ok
+
+  defp validate_background_opacity!(_),
+    do: raise(ArgumentError, "rich run background_opacity must be between zero and one")
+
   defp validate_font!(run) do
+    unless is_nil(run.font_family) or
+             (is_binary(run.font_family) and String.valid?(run.font_family) and
+                byte_size(run.font_family) in 1..256 and
+                not String.contains?(run.font_family, <<0>>)) do
+      raise ArgumentError,
+            "rich run font_family must be a non-empty UTF-8 string of at most 256 bytes"
+    end
+
     unless is_nil(run.font_weight) or run.font_weight in @weights do
       raise ArgumentError, "rich run font_weight must be one of #{inspect(@weights)}"
     end
@@ -100,6 +126,7 @@ defmodule GPUI.Text.RichRun do
          [
            run.color,
            run.background,
+           run.font_family,
            run.font_weight,
            run.font_style,
            run.underline,

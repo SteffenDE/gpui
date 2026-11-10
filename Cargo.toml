@@ -5,10 +5,13 @@ members = [
   "apps/gpui_components/native",
   "apps/gpui_native/native",
 ]
-exclude = ["apps/gpui_native/test/support/desktop/drivers/linux"]
+exclude = ["apps/gpui_native/native/compat/gpui_macos", "apps/gpui_native/native/compat/gpui_macros", "apps/gpui_native/native/compat/gpui", "apps/gpui_native/test/support/desktop/drivers/linux"]
 
 [patch.crates-io]
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 
 [patch."https://github.com/zed-industries/zed"]
+gpui_macos = { path = "apps/gpui_native/native/compat/gpui_macos" }
+gpui_macros = { path = "apps/gpui_native/native/compat/gpui_macros" }
+gpui = { path = "apps/gpui_native/native/compat/gpui" }
 ztracing = { path = "apps/gpui_native/native/compat/ztracing" }

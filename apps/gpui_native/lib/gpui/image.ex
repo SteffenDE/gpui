@@ -17,7 +17,13 @@ defmodule GPUI.Image do
   @type decode_error :: :invalid_image
   @type load_error :: decode_error() | File.posix()
 
-  @doc "Decodes PNG, JPEG, WebP, GIF, TIFF, BMP, or ICO image bytes."
+  @doc """
+  Decodes PNG, JPEG, WebP, GIF, TIFF, BMP, ICO, or UTF-8 SVG image bytes.
+
+  SVGs retain their colors, gradients, transparency, and system-font text.
+  External image references are not loaded; embedded image data is supported.
+  Animated image formats currently decode their first frame.
+  """
   @spec decode(binary()) :: {:ok, Raster.t()} | {:error, decode_error()}
   def decode(bytes) when is_binary(bytes) do
     case GPUI.Native.Backend.decode_image(bytes) do

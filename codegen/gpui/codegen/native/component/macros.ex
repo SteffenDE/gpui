@@ -129,6 +129,9 @@ defmodule GPUI.Codegen.Native.Component.Macros do
   defp component_field_type(_name, :paint_commands),
     do: quote(do: R.vec(PaintCommand.t()))
 
+  defp component_field_type(_name, :text_ranges),
+    do: quote(do: R.vec(TextRange.t()))
+
   defp component_field_type(_name, :rich_text_runs),
     do: quote(do: R.vec(RichTextRunNode.t()))
 
@@ -235,6 +238,9 @@ defmodule GPUI.Codegen.Native.Component.Macros do
 
   defp component_decoder_expr(_name, :radio_options),
     do: quote(do: unwrap!(decode_radio_options(term)))
+
+  defp component_decoder_expr(name, :text_ranges),
+    do: quote(do: unwrap!(text_ranges_attr(term, unquote(atom_call(name)))))
 
   defp component_decoder_expr(_name, :rich_text_runs),
     do: quote(do: unwrap!(decode_rich_text_runs(term)))

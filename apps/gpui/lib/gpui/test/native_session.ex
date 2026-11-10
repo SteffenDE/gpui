@@ -48,6 +48,22 @@ defmodule GPUI.Test.NativeSession do
   def click(%UI{} = ui, {x, y}), do: call(ui, {:click, point!({x, y})})
   def click(%UI{} = ui, target), do: call(ui, {:click, target!(target)})
 
+  def double_click(%UI{} = ui, target), do: call(ui, {:double_click, target!(target)})
+
+  def pinch(%UI{} = ui, target, opts) do
+    unless Keyword.keyword?(opts) and Keyword.keys(opts) -- [:delta, :phase] == [],
+      do: raise(ArgumentError, "pinch expects delta and optional phase")
+
+    delta = Keyword.fetch!(opts, :delta)
+    phase = Keyword.get(opts, :phase, :moved)
+
+    unless is_number(delta) and abs(delta) <= 100 and
+             phase in [:started, :moved, :ended, :cancelled],
+           do: raise(ArgumentError, "pinch expects a bounded delta and a valid touch phase")
+
+    call(ui, {:pinch, target!(target), delta, Atom.to_string(phase)})
+  end
+
   def drag(%UI{} = ui, from, to), do: call(ui, {:drag, point!(from), point!(to)})
 
   @spec scroll(UI.t(), String.t(), keyword()) :: UI.t()
@@ -99,6 +115,12 @@ defmodule GPUI.Test.NativeSession do
 
   def handle_call({:click, ref, target}, _from, %{ref: ref} = state),
     do: reply(state, :click, target, NativeTest.click(state.session, target))
+
+  def handle_call({:double_click, ref, target}, _from, %{ref: ref} = state),
+    do: reply(state, :double_click, target, NativeTest.double_click(state.session, target))
+
+  def handle_call({:pinch, ref, target, delta, phase}, _from, %{ref: ref} = state),
+    do: reply(state, :pinch, target, NativeTest.pinch(state.session, target, delta, phase))
 
   def handle_call({:drag, ref, {x1, y1} = from, {x2, y2} = to}, _from, %{ref: ref} = state),
     do: reply(state, :drag, {from, to}, NativeTest.drag(state.session, x1, y1, x2, y2))

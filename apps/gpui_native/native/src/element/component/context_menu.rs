@@ -151,7 +151,8 @@ impl Menu {
         let enabled = items.iter().map(|item| !item.disabled).collect::<Vec<_>>();
 
         // Choosing closes the menu before reporting the value.
-        let choose: Rc<dyn Fn(usize, &mut gpui::App)> = {
+        type ChooseItem = Rc<dyn Fn(usize, &mut gpui::App)>;
+        let choose: ChooseItem = {
             let menu = menu.clone();
             Rc::new(move |index, cx| {
                 menu.update(cx, |menu, cx| menu.close(cx));

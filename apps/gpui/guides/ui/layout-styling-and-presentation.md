@@ -3,6 +3,25 @@
 Static design values use Tailwind-compatible classes. Runtime-derived native
 geometry uses explicit bounded attributes rather than dynamic CSS expressions.
 
+## Hover groups
+
+A named group can change a descendant's visibility or background while the
+pointer is anywhere inside the group:
+
+```elixir
+<div class="group/row hover:bg-[#1d1f24]">
+  <text class="bg-[#16191d] group-hover/row:bg-[#1d1f24]">3</text>
+  <button class="invisible group-hover/row:visible">More</button>
+</div>
+```
+
+Unnamed groups use `group` and `group-hover:bg-*`. Background utilities accept
+the same colors and alpha modifiers as ordinary `bg-*` utilities. The explicit
+style form is `group_hover_background: {"row", {:rgb, 0x1D1F24}}`.
+Named class groups normalize to bounded strings; explicit atom group names
+remain supported at the native boundary. Hover styling stays in the native
+renderer and does not require application hover events.
+
 ## Ordinary positioning versus anchored layers
 
 The default positioning model remains HTML-like composition with
@@ -77,6 +96,27 @@ animation. Motion respects GPUI's reduced-motion preference and emits no
 completion event; application behavior must not depend on presentation timing.
 See [Decision: declarative native motion](declarative-motion.html)
 for bounds, ownership, interruption, and remote-display behavior.
+
+Use `motion_to_opacity`, `motion_to_x`, and `motion_to_y` for explicit destinations.
+`motion_repeat={true}` repeats the duration; `motion_alternate={true}` travels
+from the starting values to the destinations and back within each duration.
+`ease_in_out` uses CSS cubic-bezier(0.42, 0, 0.58, 1). Offsets remain pixels;
+responsive consumers derive them from their measured viewport.
+
+SVGs without an explicit foreground inherit the surrounding text color at
+paint time, including ancestor hover colors. Explicit SVG colors override that
+inheritance. Foreground and background hover styles can be used together; the
+native generator combines them into one refinement.
+
+Inline SVGs accept `id` and `spin_duration` in milliseconds (`0` disables rotation).
+Rotation runs clockwise about the SVG center and respects reduced motion. Stable
+IDs retain animation phase across ordinary view updates. Repeating presentation
+runs in the native frame loop without application timers.
+
+Native tree payloads are limited to 128 nested child levels. Deeper trees return
+`native_tree_too_deep`; the window/session remains usable. Tree decoding uses an
+owned Rustler environment and an explicit Rust worker stack so deeply composed
+views do not exhaust a BEAM scheduler thread's stack.
 
 ## Element bounds
 
@@ -187,3 +227,109 @@ refreshes every open native window:
 
 See `GPUI.UI` for the complete option-level API and
 [Overlays and menus](overlays-and-menus.html) for named-slot components.
+
+
+## Vertical scroll requests
+
+An ordinary `<scroll>` keeps a native vertical scroll offset while it is mounted.
+Use a stable `id`, set `scroll_top` in logical pixels from the content's top,
+and increment `scroll_request` to request a new position. A zero request leaves
+the position under native wheel control. Changing only `scroll_top` does not
+move the viewport; rerenders preserve the current position. Requested offsets
+are clamped to the content's available extent.
+
+```heex
+<scroll id="discussion" scroll_top={assigns.top}
+  scroll_request={assigns.request} phx-scroll="discussion_scrolled"
+  class="grow min-h-0">
+  <div class="flex flex-col">...</div>
+</scroll>
+```
+
+`phx-scroll` receives a change event with `[top, viewport_height, maximum_top]`
+in logical pixels when those values change, including wheel movement and
+content or viewport resizing. `phx-bounds-change` can report the viewport's
+window-relative position independently. Together with descendant bounds, these
+values let the application reveal a target without estimating text heights.
+Set `scrollbar: true` for an interactive vertical scrollbar. Overflow reserves
+10 logical pixels from the content width; fitting content has no gutter or
+thumb. The six-pixel thumb uses the container's foreground at 20% opacity
+(35% while hovered or dragged). It supports wheel scrolling, track paging with
+a 40-pixel overlap (at least 80% of the viewport), and thumb dragging with
+pointer capture. Scrollbar presses preserve the existing focus.
+
+The scrollbar is off by default. The container does not choose an application
+focus policy. Use a new ID when the scroll content represents a different target.
+
+
+### Fractional computed bounds
+
+`style={[preserve_layout_bounds: true]}` preserves fractional computed
+border-box positions and dimensions for an element and its descendants.
+For example, a 24px control centered in the 35px inner height of a 36px
+header with a 1px bottom border starts at y5.5. Hit testing, accessibility
+bounds, and painting use that same fractional box. Siblings outside the
+subtree retain the normal device-pixel edge snapping.
+
+This is an opt-in final-bounds policy. Authored lengths (including border
+and padding metrics) and measured leaf sizes retain their existing snapping
+policy. It does not disable every form of pixel snapping or change default
+rendering elsewhere.
+
+
+## Outside rings and shadows
+
+Use `ring-1 ring-slate-300/10` for an outside ring and `shadow-md` for
+Tailwind-compatible drop shadows. Supported shadow sizes are `2xs`, `xs`,
+`sm`, `md`, `lg`, `xl`, `2xl`, and `none`. These decorations do not change
+layout, content padding, or pointer hit areas. They remain subject to ancestor
+paint clipping. A ring requires a color; its default width is one logical pixel.
+
+Explicit styles accept a list of shadow layers in CSS paint order (the first
+layer appears on top):
+
+```elixir
+<div style={[
+  ring_width: {:px, 1.0},
+  ring_color: {:rgba, 0xD7DBE11A},
+  box_shadow: [
+    {0.0, 4.0, 6.0, -1.0, {:rgba, 0x0000001A}},
+    {0.0, 2.0, 4.0, -2.0, {:rgba, 0x0000001A}}
+  ]
+]}>...</div>
+```
+
+Each tuple is `{offset_x, offset_y, blur_radius, spread_radius, color}`.
+Lengths use logical CSS pixels. Offsets and spread may be negative; blur must
+be nonnegative, and every number must remain finite in the native renderer.
+The renderer converts the CSS blur radius to Gaussian sigma internally.
+`box_shadow: []` clears shadow layers. An outside ring follows the element's
+corner radii and paints between the shadows and the element background.
+
+
+### Paint-bound rounding
+
+`style={[paint_rounding: :half_up]}` rounds rectangular paint edges to the
+nearest device pixel with ties toward positive infinity. This applies to the
+subtree's backgrounds, borders, outside rings and SVG/image rectangles
+that use the shared bounds snapper. Content masks retain their covering policy. It leaves layout, hit testing, stroke-width
+snapping and glyph rasterization unchanged. Use `preserve_layout_bounds: true`
+when computed fractional geometry must reach this paint step.
+
+The default remains half-toward-zero. Descendants inherit an explicit policy;
+`paint_rounding: :half_toward_zero` resets it for a nested subtree. The policy
+is restored after the subtree paints, so siblings keep their own rounding.
+
+## Rich tooltip cards
+
+`GPUI.UI.Overlay.tooltip/1` accepts ordinary display elements in its content
+slot, including vectors, styled text and layout containers. Text-only content
+and shortcut slots retain their existing behavior. Use a popover for interactive
+controls. Rich content updates refresh an already visible tooltip.
+
+Use `placement: "top_start"` or `"top_end"` to align above a trigger's left or
+right edge; `bottom_start` and `bottom_end` provide matching lower placements.
+Alignment is preserved when the side flips, with ordinary viewport clamping.
+`close_delay` defaults to 500ms for hoverable tooltips; zero dismisses immediately
+after leaving both the trigger and popup. Anchored hoverable tooltips allow
+pointer transfer through the gap between overlapping trigger and popup edges.

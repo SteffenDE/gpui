@@ -276,3 +276,40 @@ machine. This is intentionally display-local for remote sessions. If
 platform write. Tests use `GPUI.Test.select/4`, `GPUI.Test.range/5`, and
 `GPUI.Test.copy_selected_line/3`; deterministic helpers do not access the host
 clipboard.
+
+
+## Multiple tree selection
+
+Enable `multiple: true` and store the ordered ID list delivered by
+`phx-selection-change` in `selected_items`. `phx-change` continues to report
+file activation independently. The scalar `selected` value follows the primary
+item for focus; it does not replace the group in multiple mode.
+
+```heex
+<UI.tree id="files" label="Files" multiple={true}
+  selected={assigns.primary} selected_items={assigns.selected_items}
+  selection_items={assigns.visible_selectable_ids}
+  select_on_navigation={false} toggle_on_click={true}
+  phx-selection-change="file_selection_changed"
+  phx-change="file_selected" phx-toggle="directory_toggled"
+  style={[selected_background: {:rgb, 0x212428}]}>
+  ...
+</UI.tree>
+```
+
+Shift-click selects a visible range; Control/Command-click toggles a row.
+Shift-Up/Down extends selection, or contracts it when both the current and next
+row are already selected. Control/Command-Space toggles the focused row, and
+Control/Command-A selects the complete visible selectable order. Ordinary arrows
+retain the existing roving-focus behavior. A primary-modifier click with
+`phx-open` opens rather than changing the group; Command-Enter opens as well.
+
+For virtual trees, `selection_items` supplies unique selectable IDs in visible
+order, including unloaded rows and excluding disabled or collapsed rows.
+Without it the supplied enabled children define that order. Selected IDs can
+remain selected while hidden by a collapsed directory. Store group state with
+each view/tab, and reset it when the caller replaces its path model. To follow
+a file exclusively, set `selected_items` to that file's ID when the file changes.
+The selected background otherwise uses the component theme's accent. Row
+accessibility selection reflects the group independently of keyboard focus.
+Single-selection callers keep their existing behavior with `multiple: false`.

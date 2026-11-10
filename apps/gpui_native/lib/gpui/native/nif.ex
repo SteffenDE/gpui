@@ -115,7 +115,15 @@ defmodule GPUI.Native.NIF do
       extension = if match?({:win32, _}, :os.type()), do: ".dll", else: ".so"
       source = Path.join(project_root, "priv/native/gpui_nif#{extension}")
       destination = Path.join(project_root, "priv/native/#{source_artifact}#{extension}")
-      File.cp!(source, destination)
+      # Replacing a loaded Mach-O in place can leave macOS's code-signature
+      # page cache referring to the previous build. Publish a new inode instead.
+      if :os.type() == {:unix, :darwin} do
+        temporary = destination <> ".#{System.unique_integer([:positive])}.tmp"
+        File.cp!(source, temporary)
+        File.rename!(temporary, destination)
+      else
+        File.cp!(source, destination)
+      end
     end
   end
 

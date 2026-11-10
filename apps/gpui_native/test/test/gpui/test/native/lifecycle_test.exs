@@ -37,6 +37,29 @@ defmodule GPUI.Test.Native.LifecycleTest do
     assert ^ui = render(ui, ExtensionView, %{})
   end
 
+  test "rich text accepts older payloads without an optional font family", %{ui: ui} do
+    alias GPUI.Text.{Position, Range, RichRun}
+
+    tree =
+      GPUI.UI.rich_text(%{
+        id: "legacy-rich",
+        label: "Legacy rich text",
+        text: "Link",
+        runs: [
+          RichRun.new(Range.new(Position.new(0, 0), Position.new(0, 4)), link: "destination")
+        ],
+        "phx-link": "opened"
+      })
+      |> GPUI.Element.to_payload()
+
+    tree = update_in(tree.attrs.runs, &Enum.map(&1, fn run -> Map.delete(run, :font_family) end))
+    session = ui.pid |> :sys.get_state() |> Map.fetch!(:session)
+    GPUI.Native.TestDriver.render(session, %{type: :viewport, attrs: %{}, children: [tree]})
+    settle(ui)
+    click(ui, {10, 8})
+    assert_receive {:gpui, ^ui, {:event, %{type: :link, event: "opened", value: "destination"}}}
+  end
+
   test "native rejects missing extension payload versions", %{ui: ui} do
     tree =
       ExtensionView

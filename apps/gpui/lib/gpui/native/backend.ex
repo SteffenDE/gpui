@@ -64,11 +64,33 @@ defmodule GPUI.Native.Backend do
   @doc "Sets the process-global native application identity."
   def set_app_identity(identifier, name), do: call(:set_app_identity, [identifier, name])
 
+  @doc "Reads the OS notification authorization without prompting."
+  def system_notification_status, do: call(:system_notification_status, [])
+
+  @doc "Explicitly requests OS notification authorization."
+  def request_system_notifications, do: call(:request_system_notifications, [])
+
+  @doc "Posts a best-effort OS notification without requesting permission."
+  def show_system_notification(tag, title, subtitle, body, sound),
+    do: call(:show_system_notification, [tag, title, subtitle, body, sound])
+
+  @doc "Retracts a tagged OS notification."
+  def dismiss_system_notification(tag), do: call(:dismiss_system_notification, [tag])
+
+  @doc "Routes OS notification activations to the calling process."
+  def subscribe_system_notifications, do: call(:subscribe_system_notifications, [])
+
   @doc "Starts one native runtime namespace."
   def start_runtime, do: call(:start_runtime, [])
 
   @doc "Stops one native runtime namespace."
   def stop_runtime(runtime), do: call(:stop_runtime, [runtime])
+
+  @doc "Brings a native window to the foreground."
+  def activate_window(runtime, window_id), do: call(:activate_window, [runtime, window_id])
+
+  @doc "Loads application font bytes into the native text system."
+  def load_font(runtime, bytes), do: call(:load_font, [runtime, bytes])
 
   @doc "Opens a native window from a serialized window snapshot."
   def open_window(runtime, window), do: call(:open_window, [runtime, window])
@@ -125,6 +147,14 @@ defmodule GPUI.Native.Backend do
 
   @doc "Clicks a target in a deterministic native-test session."
   def native_test_click(session, target), do: call(:native_test_click, [session, target])
+
+  @doc "Double-clicks a native-test target."
+  def native_test_double_click(session, target),
+    do: call(:native_test_double_click, [session, target])
+
+  @doc "Sends a native pinch gesture to a native-test target."
+  def native_test_pinch(session, target, delta, phase),
+    do: call(:native_test_pinch, [session, target, delta, phase])
 
   @doc "Drags between native-test coordinates."
   def native_test_drag(session, x1, y1, x2, y2),

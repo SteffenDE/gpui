@@ -23,10 +23,11 @@ native-test = ["gpui-component-host", "zed_gpui/test-support"]
 gpui_core = { path = "../../gpui/native" }
 gpui_components = { path = "../../gpui_components/native", optional = true }
 rustler = "0.38.0"
-# gpui-component uses the unqualified Zed source. Keep these source IDs identical
-# and pin the shared revision through Cargo.lock so all GPUI types are unified.
-zed_gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", optional = true }
-gpui_platform = { git = "https://github.com/zed-industries/zed", package = "gpui_platform", optional = true, features = ["runtime_shaders"] }
+# The component crate uses an unqualified GPUI Git dependency. The workspace
+# and standalone-host patches unify it with our local core and macros. Keep
+# auxiliary Zed crates on the revision recorded in compat/gpui/ORIGIN.md.
+zed_gpui = { git = "https://github.com/zed-industries/zed", rev = "1662f5f3f6497c5f80830ccdca1edfd1fc0c6c6a", package = "gpui", optional = true }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "1662f5f3f6497c5f80830ccdca1edfd1fc0c6c6a", package = "gpui_platform", optional = true, features = ["runtime_shaders"] }
 gpui-component = { git = "https://github.com/longbridge/gpui-component", rev = "5c5eb1db04dc1146bdec903a8ac74407bd6c2098", optional = true }
 gpui-component-assets = { git = "https://github.com/longbridge/gpui-component", rev = "5c5eb1db04dc1146bdec903a8ac74407bd6c2098", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
@@ -34,7 +35,7 @@ futures = { version = "0.3", optional = true }
 unicode-segmentation = { version = "1.12", optional = true }
 
 [dev-dependencies]
-zed_gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", features = ["test-support"] }
+zed_gpui = { git = "https://github.com/zed-industries/zed", rev = "1662f5f3f6497c5f80830ccdca1edfd1fc0c6c6a", package = "gpui", features = ["test-support"] }
 smallvec = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -47,4 +48,7 @@ libc = "0.2"
 async-process = { git = "https://github.com/zed-industries/async-process.git", rev = "0b6d6713570af61806e1e5cb40e0f757cb93fd9d" }
 
 [patch."https://github.com/zed-industries/zed"]
+gpui_macos = { path = "compat/gpui_macos" }
+gpui_macros = { path = "compat/gpui_macros" }
+gpui = { path = "compat/gpui" }
 ztracing = { path = "compat/ztracing" }

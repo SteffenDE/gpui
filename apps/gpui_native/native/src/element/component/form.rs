@@ -83,6 +83,16 @@ fn selected_choice_label(value: Option<&str>, options: &[SelectOptionNode]) -> O
 }
 
 #[cfg(feature = "components")]
+fn prepare_insert_text(value: &str, start: usize, text: &str, on_new_line: bool) -> String {
+    let before = value.get(..start).unwrap_or_default();
+    if on_new_line && !before.is_empty() && !before.ends_with('\n') {
+        format!("\n{text}")
+    } else {
+        text.to_string()
+    }
+}
+
+#[cfg(feature = "components")]
 pub(crate) fn render_input_component(
     _element_id: usize,
     node: InputComponentNode,
@@ -115,7 +125,7 @@ pub(crate) fn render_input_component(
             if node.multiline {
                 state = state
                     .auto_grow(1, node.max_rows.clamp(1, 64) as usize)
-                    .submit_on_enter(true);
+                    .submit_on_enter(node.submit_on_enter);
             }
             if node.masked {
                 state = state.masked(true);
@@ -132,17 +142,34 @@ pub(crate) fn render_input_component(
         let window_id = context.window_id;
         let event_binding = binding.clone();
         let event_submit = submit_event.clone();
+        let suppressed_changes = Arc::new(Mutex::new(0usize));
+        let event_suppressed_changes = suppressed_changes.clone();
         let multiline = node.multiline;
+        let submit_on_enter = node.submit_on_enter;
         let subscription = context.cx.subscribe_in(
             &state,
             context.window,
             move |_root, state, event: &InputEvent, _window, cx| {
                 let value = state.read(cx).value().to_string();
 
-                // Shift+Enter inserts a newline silently and emits PressEnter, not Change.
-                match (event, multiline) {
-                    (InputEvent::Change, _)
-                    | (InputEvent::PressEnter { shift: true, .. }, true) => {
+                // InputState emits Change for inserted newlines; PressEnter is
+                // an additional notification, not another text edit.
+                match (event, multiline, submit_on_enter) {
+                    (InputEvent::Change, _, _) => {
+                        let suppressed = event_suppressed_changes
+                            .lock()
+                            .map(|mut count| {
+                                if *count > 0 {
+                                    *count -= 1;
+                                    true
+                                } else {
+                                    false
+                                }
+                            })
+                            .unwrap_or(false);
+                        if suppressed {
+                            return;
+                        }
                         let event = event_binding.lock().ok().and_then(|mut binding| {
                             binding.event.clone().inspect(|_event| {
                                 binding.push_pending(value.clone());
@@ -166,7 +193,15 @@ pub(crate) fn render_input_component(
                             }
                         }
                     }
-                    (InputEvent::PressEnter { .. }, _) => {
+                    (InputEvent::PressEnter { shift: true, .. }, true, _)
+                    | (
+                        InputEvent::PressEnter {
+                            secondary: false, ..
+                        },
+                        true,
+                        false,
+                    ) => {}
+                    (InputEvent::PressEnter { .. }, _, _) => {
                         let event = event_submit.lock().ok().and_then(|event| event.clone());
                         if let Some(event) = event {
                             let _ = push_event(
@@ -180,7 +215,7 @@ pub(crate) fn render_input_component(
                             );
                         }
                     }
-                    (InputEvent::Focus | InputEvent::Blur, _) => {}
+                    (InputEvent::Focus | InputEvent::Blur, _, _) => {}
                 }
             },
         );
@@ -193,21 +228,20 @@ pub(crate) fn render_input_component(
         if let Ok(mut bindings) = runtime_for_focus.focus_bindings.lock() {
             bindings.insert((window_id, input_id.clone()), (focus_event, blur_event));
         }
-        let install_focus = runtime_for_focus
-            .focus_observers
-            .lock()
-            .map(|mut observers| observers.insert((window_id, input_id.clone())))
-            .unwrap_or(false);
-        if install_focus {
-            crate::element::install_focus_observers(
-                focus_handle,
-                input_id,
-                runtime_for_focus,
-                window_id,
-                context.window,
-                context.cx,
-            );
+        // A component removed from the tree loses its InputState. Reusing its
+        // logical id creates a new FocusHandle, so bind observers to that new
+        // handle even if the previous instance used the same id.
+        if let Ok(mut observers) = runtime_for_focus.focus_observers.lock() {
+            observers.insert((window_id, input_id.clone()));
         }
+        crate::element::install_focus_observers(
+            focus_handle,
+            input_id,
+            runtime_for_focus,
+            window_id,
+            context.window,
+            context.cx,
+        );
         context.components.insert_input(
             &node.id,
             ComponentInput {
@@ -215,6 +249,8 @@ pub(crate) fn render_input_component(
                 binding,
                 submit_event,
                 focus_request: 0,
+                insert_request: 0,
+                suppressed_changes,
                 placeholder: node.placeholder.clone().unwrap_or_default(),
                 masked: node.masked,
                 loading: false,
@@ -251,6 +287,101 @@ pub(crate) fn render_input_component(
         input.state.update(context.cx, |state, cx| {
             state.set_value(node.value.clone(), context.window, cx)
         });
+    }
+
+    if input.insert_request != node.insert_request {
+        input.insert_request = node.insert_request;
+        if node.insert_request > 0 {
+            let before = input.state.read(context.cx).value().to_string();
+            let value = if node.disabled {
+                before.clone()
+            } else {
+                input.state.update(context.cx, |state, cx| {
+                    let selected = state.selected_range();
+                    let found = node.insert_match.as_deref().and_then(|needle| {
+                        if needle.is_empty() {
+                            None
+                        } else {
+                            before.find(needle).map(|start| start..start + needle.len())
+                        }
+                    });
+                    if node.insert_match.is_none() || found.is_some() {
+                        let range = found.clone().unwrap_or_else(|| selected.clone());
+                        let text = prepare_insert_text(
+                            &before,
+                            range.start,
+                            node.insert_text.as_deref().unwrap_or_default(),
+                            node.insert_on_new_line,
+                        );
+                        if found.is_some() {
+                            state.set_selected_range(range.clone(), cx);
+                        }
+                        if before.get(range.clone()) != Some(text.as_str()) {
+                            if let Ok(mut count) = input.suppressed_changes.lock() {
+                                *count += 1;
+                            }
+                            state.replace(text.clone(), context.window, cx);
+                        } else if found.is_none() {
+                            state.set_selected_range(range.end..range.end, cx);
+                        }
+                        if found.is_some() {
+                            let adjust = |offset: usize| {
+                                if offset < range.start {
+                                    offset
+                                } else if offset >= range.end {
+                                    offset - range.len() + text.len()
+                                } else {
+                                    range.start + text.len()
+                                }
+                            };
+                            state.set_selected_range(
+                                adjust(selected.start)..adjust(selected.end),
+                                cx,
+                            );
+                        }
+                    }
+                    state.value().to_string()
+                })
+            };
+            if value != before {
+                let event = input.binding.lock().ok().and_then(|mut binding| {
+                    binding
+                        .event
+                        .clone()
+                        .inspect(|_| binding.push_pending(value.clone()))
+                });
+                if let Some(event) = event {
+                    let result = push_event(
+                        &context.runtime,
+                        NativeEvent::Input {
+                            kind: InputKind::Change,
+                            window_id: context.window_id,
+                            event,
+                            value: Some(EventValue::String(value.clone())),
+                        },
+                    );
+                    if result.is_err() {
+                        if let Ok(mut binding) = input.binding.lock() {
+                            binding.pop_pending();
+                        }
+                    }
+                }
+            }
+            if let Some(event) = node.inserted.clone() {
+                let _ = push_event(
+                    &context.runtime,
+                    NativeEvent::Input {
+                        kind: InputKind::Change,
+                        window_id: context.window_id,
+                        event,
+                        value: Some(EventValue::Strings(vec![
+                            node.insert_request.to_string(),
+                            value,
+                        ])),
+                    },
+                );
+            }
+        }
     }
 
     let placeholder = node.placeholder.unwrap_or_default();
@@ -308,6 +439,51 @@ pub(crate) fn render_input_component(
         })
         .flex()
         .w_full();
+    if node.multiline && !node.submit_on_enter {
+        let state = input.state.clone();
+        let submit_event = input.submit_event.clone();
+        let runtime = context.runtime.clone();
+        let window_id = context.window_id;
+        accessible_element = accessible_element.capture_action(
+            move |action: &gpui_component::input::Enter, window, cx| {
+                if action.secondary && !action.shift {
+                    if let Some(event) = submit_event.lock().ok().and_then(|event| event.clone()) {
+                        let _ = push_event(
+                            &runtime,
+                            NativeEvent::Input {
+                                kind: InputKind::Submit,
+                                window_id,
+                                event,
+                                value: Some(EventValue::String(state.read(cx).value().to_string())),
+                            },
+                        );
+                    }
+                    window.prevent_default();
+                    cx.stop_propagation();
+                }
+            },
+        );
+    }
+    if let Some(event) = node.keystroke.clone() {
+        let runtime = context.runtime.clone();
+        let window_id = context.window_id;
+        let keys = node.capture_keys.clone();
+        accessible_element = accessible_element.capture_key_down(move |key, window, cx| {
+            crate::element::event::emit_structured_key(
+                &runtime,
+                window_id,
+                &event,
+                &key.keystroke,
+                key.is_held,
+            );
+            let m = key.keystroke.modifiers;
+            if !m.control && !m.platform && !m.alt && !m.shift && keys.contains(&key.keystroke.key)
+            {
+                window.prevent_default();
+                cx.stop_propagation();
+            }
+        });
+    }
     if node.multiline {
         accessible_element = accessible_element.h_auto();
     } else {
@@ -466,11 +642,14 @@ pub(crate) fn render_select_component(
         .read(context.cx)
         .selected_value()
         .map(ToString::to_string);
-    if apply_value && current_value != node.value {
+    if apply_value && (options_changed || current_value != node.value) {
         let value = node.value.clone();
-        select.state.update(context.cx, |state, cx| match value {
-            Some(value) => state.set_selected_value(&value.into(), context.window, cx),
-            None => state.set_selected_index(None, context.window, cx),
+        select.state.update(context.cx, |state, cx| {
+            match value {
+                Some(value) => state.set_selected_value(&value.into(), context.window, cx),
+                None => state.set_selected_index(None, context.window, cx),
+            }
+            cx.notify();
         });
     }
 
@@ -769,10 +948,14 @@ pub(crate) fn render_input_component(
             id: Some(node.id),
             value: node.value,
             placeholder: node.placeholder,
+            capture_keys: Vec::new(),
+            select_all_request: 0,
             focus_request: node.focus_request,
             change: node.change,
             keydown: node.keydown,
             keyup: None,
+            keystroke: None,
+            keyrelease: None,
             focus: node.focus,
             blur: node.blur,
         },

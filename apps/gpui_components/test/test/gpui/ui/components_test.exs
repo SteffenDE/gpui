@@ -38,6 +38,8 @@ defmodule GPUI.UI.ComponentsTest do
              })
 
     assert picker[:file_max_bytes] == 10 * 1_024 * 1_024
+    refute picker[:file_multiple]
+    assert UI.button(%{id: "photos", label: "Photos", file_multiple: true}).attrs[:file_multiple]
 
     assert %Element{type: :ui_button, attrs: copy} =
              UI.button(%{

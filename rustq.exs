@@ -257,8 +257,16 @@ generate "native-stubs", "apps/gpui/lib/gpui/native/generated.ex" do
           host_info: MetaAST.function!(GPUI.Codegen.Native.RuntimeBoundary, :host_info),
           set_app_identity:
             MetaAST.function!(GPUI.Codegen.Native.RuntimeBoundary, :set_app_identity),
+          system_notification_status:
+            MetaAST.function!(GPUI.Codegen.Native.RuntimeBoundary, :system_notification_status),
+          request_system_notifications:
+            MetaAST.function!(GPUI.Codegen.Native.RuntimeBoundary, :request_system_notifications),
+          show_system_notification: MetaAST.function!(GPUI.Codegen.Native.RuntimeBoundary, :show_system_notification),
+          dismiss_system_notification: MetaAST.function!(GPUI.Codegen.Native.RuntimeBoundary, :dismiss_system_notification),
+          subscribe_system_notifications: MetaAST.function!(GPUI.Codegen.Native.RuntimeBoundary, :subscribe_system_notifications),
           start_runtime: MetaAST.function!(GPUI.Codegen.Native.RuntimeBoundary, :start_runtime),
           stop_runtime: MetaAST.function!(GPUI.Codegen.Native.RuntimeBoundary, :stop_runtime),
+          activate_window: MetaAST.function!(GPUI.Codegen.Native.Window, :activate_window),
           open_window: MetaAST.function!(GPUI.Codegen.Native.Window, :open_window),
           update_window: MetaAST.function!(GPUI.Codegen.Native.Window, :update_window),
           close_window: MetaAST.function!(GPUI.Codegen.Native.Window, :close_window),
@@ -266,6 +274,7 @@ generate "native-stubs", "apps/gpui/lib/gpui/native/generated.ex" do
           frame_token: MetaAST.function!(GPUI.Codegen.Native.Window, :frame_token),
           await_frame_after: MetaAST.function!(GPUI.Codegen.Native.Window, :await_frame_after),
           set_theme: MetaAST.function!(GPUI.Codegen.Native.Window, :set_theme),
+          load_font: MetaAST.function!(GPUI.Codegen.Native.Window, :load_font),
           put_resource: MetaAST.function!(GPUI.Codegen.Native.ResourceBoundary, :put_resource),
           drop_resource: MetaAST.function!(GPUI.Codegen.Native.ResourceBoundary, :drop_resource),
           drain_events: MetaAST.function!(GPUI.Codegen.Native.EventBoundary, :drain_events),
@@ -282,7 +291,12 @@ generate "native-stubs", "apps/gpui/lib/gpui/native/generated.ex" do
             MetaAST.function!(GPUI.Codegen.Native.TestBoundary, :native_test_focus),
           native_test_click:
             MetaAST.function!(GPUI.Codegen.Native.TestBoundary, :native_test_click),
-          native_test_drag: MetaAST.function!(GPUI.Codegen.Native.TestBoundary, :native_test_drag),
+          native_test_double_click:
+            MetaAST.function!(GPUI.Codegen.Native.TestBoundary, :native_test_double_click),
+          native_test_pinch:
+            MetaAST.function!(GPUI.Codegen.Native.TestBoundary, :native_test_pinch),
+          native_test_drag:
+            MetaAST.function!(GPUI.Codegen.Native.TestBoundary, :native_test_drag),
           native_test_click_at:
             MetaAST.function!(GPUI.Codegen.Native.TestBoundary, :native_test_click_at),
           native_test_scroll:

@@ -230,9 +230,80 @@ defmodule GPUI.UI.Collection.Validation do
       raise ArgumentError, "ui_rich_text supports at most #{@max_rich_text_runs} runs"
     end
 
+    group = Map.get(assigns, :scroll_group)
+    if group == "", do: raise(ArgumentError, "ui_rich_text scroll_group must be non-empty")
+
+    if Map.get(assigns, :scrollbar, false) && is_nil(group),
+      do: raise(ArgumentError, "ui_rich_text scrollbar requires scroll_group")
+
+    tab_size = Map.get(assigns, :tab_size, 2)
+
+    unless is_integer(tab_size) and tab_size in 1..32 do
+      raise ArgumentError, "ui_rich_text tab_size must be an integer between 1 and 32"
+    end
+
+    padding = Map.get(assigns, :scroll_padding, 8.0)
+
+    unless is_number(padding) and padding >= 0 and padding <= 1_000_000 do
+      raise ArgumentError, "ui_rich_text scroll_padding must be between zero and 1000000 pixels"
+    end
+
+    gutter = Map.get(assigns, :scrollbar_gutter, 0.0)
+
+    unless is_number(gutter) and gutter >= 0 and gutter <= 1_000_000 do
+      raise ArgumentError, "ui_rich_text scrollbar_gutter must be between zero and 1000000 pixels"
+    end
+
+    if gutter > 0 and (text != "" or not Map.get(assigns, :scrollbar, false)) do
+      raise ArgumentError, "ui_rich_text scrollbar_gutter requires an empty scrollbar row"
+    end
+
+    case {Map.get(assigns, :hit_test_x), Map.get(assigns, :hit_test_y),
+          Map.get(assigns, :hit_test_request, 0)} do
+      {nil, nil, 0} ->
+        :ok
+
+      {x, y, request}
+      when is_number(x) and is_number(y) and abs(x) <= 1.0e9 and abs(y) <= 1.0e9 and
+             is_integer(request) and request >= 0 ->
+        validate_event!(:ui_rich_text, assigns, :"phx-hit-test")
+
+      _ ->
+        raise ArgumentError,
+              "ui_rich_text hit testing requires finite window coordinates and phx-hit-test"
+    end
+
+    validate_rich_reveal!(assigns)
     line_offsets = utf16_line_offsets(text)
     validate_rich_runs!(runs, line_offsets)
     validate_rich_link_event!(runs, assigns)
+  end
+
+  defp validate_rich_reveal!(assigns) do
+    case {Map.get(assigns, :reveal_start), Map.get(assigns, :reveal_end)} do
+      {nil, nil} ->
+        :ok
+
+      {first, last}
+      when is_integer(first) and is_integer(last) and first >= 0 and last >= first ->
+        if String.contains?(assigns.text, "\n"),
+          do: raise(ArgumentError, "ui_rich_text reveal requires single-line text")
+
+        boundaries = [
+          0
+          | Enum.scan(String.to_charlist(assigns.text), 0, fn char, sum ->
+              sum + if(char > 0xFFFF, do: 2, else: 1)
+            end)
+        ]
+
+        unless Map.get(assigns, :scroll_group) && first in boundaries && last in boundaries do
+          raise ArgumentError,
+                "ui_rich_text reveal requires scroll_group and valid UTF-16 boundaries"
+        end
+
+      _ ->
+        raise ArgumentError, "ui_rich_text reveal_start and reveal_end require a forward pair"
+    end
   end
 
   defp validate_rich_runs!(runs, line_offsets) do
@@ -266,7 +337,12 @@ defmodule GPUI.UI.Collection.Validation do
 
   defp validate_rich_link_event!(runs, assigns) do
     if Enum.any?(runs, &(not is_nil(&1.link))) do
-      validate_event!(:ui_rich_text, assigns, :"phx-link")
+      event =
+        if is_nil(assigns[:"phx-link"]) and not is_nil(assigns[:"phx-link-hover"]),
+          do: :"phx-link-hover",
+          else: :"phx-link"
+
+      validate_event!(:ui_rich_text, assigns, event)
     end
 
     :ok

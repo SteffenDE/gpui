@@ -249,6 +249,10 @@ fn render_visible_items(
         let item_element_id = format!("gpui-elixir-virtual-item-{window_id}-{list_id}-{item_id}");
         let children = {
             let mut item_context = ElementRenderContext {
+                pointer_observers: root.pointer_observers.clone(),
+                scrolls: root.scrolls.clone(),
+                horizontal_groups: root.horizontal_groups.clone(),
+                tooltip_focus_owner: None,
                 runtime: runtime.clone(),
                 window_id,
                 next_element_id: 0,

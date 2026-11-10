@@ -31,7 +31,7 @@ defmodule GPUI.Codegen.Native.SchemaTypesTest do
         (GPUI.Codegen.Native.Host.components()
          |> Enum.filter(&String.ends_with?(Atom.to_string(&1.kind), "_component"))
          |> Enum.map(&variant(&1.kind))) ++
-        [:Image, :Text]
+        [:Image, :Svg, :Text]
 
     assert Enum.map(element_node.variants, & &1.name) == expected
   end

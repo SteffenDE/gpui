@@ -19,10 +19,14 @@ pub(crate) mod edge_fade;
 pub(crate) mod form;
 pub(crate) mod frost;
 #[cfg(feature = "components")]
+pub(crate) mod horizontal;
+#[cfg(feature = "components")]
 pub(crate) mod menu_button;
 #[cfg(feature = "components")]
 pub(crate) mod overlay;
 pub(crate) mod paint;
+#[cfg(feature = "components")]
+pub(crate) mod pan_zoom;
 #[cfg(feature = "components")]
 pub(crate) mod radio;
 #[cfg(feature = "components")]
@@ -41,6 +45,8 @@ pub(crate) mod terminal;
 pub(crate) mod text_surface;
 #[cfg(feature = "components")]
 pub(crate) mod tree;
+#[cfg(feature = "components")]
+mod tree_selection;
 #[cfg(feature = "components")]
 pub(crate) mod uniform_collection;
 #[cfg(feature = "components")]

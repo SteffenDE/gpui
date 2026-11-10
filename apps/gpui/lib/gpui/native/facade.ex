@@ -34,12 +34,42 @@ defmodule GPUI.Native.Facade do
         apply(GPUI.Native.Backend.module(), :set_app_identity, [_identifier, _name])
       end
 
+      def system_notification_status() do
+        apply(GPUI.Native.Backend.module(), :system_notification_status, [])
+      end
+
+      def request_system_notifications() do
+        apply(GPUI.Native.Backend.module(), :request_system_notifications, [])
+      end
+
+      def show_system_notification(_tag, _title, _subtitle, _body, _sound) do
+        apply(GPUI.Native.Backend.module(), :show_system_notification, [
+          _tag,
+          _title,
+          _subtitle,
+          _body,
+          _sound
+        ])
+      end
+
+      def dismiss_system_notification(_tag) do
+        apply(GPUI.Native.Backend.module(), :dismiss_system_notification, [_tag])
+      end
+
+      def subscribe_system_notifications() do
+        apply(GPUI.Native.Backend.module(), :subscribe_system_notifications, [])
+      end
+
       def start_runtime() do
         apply(GPUI.Native.Backend.module(), :start_runtime, [])
       end
 
       def stop_runtime(_runtime) do
         apply(GPUI.Native.Backend.module(), :stop_runtime, [_runtime])
+      end
+
+      def activate_window(_runtime, _window_id) do
+        apply(GPUI.Native.Backend.module(), :activate_window, [_runtime, _window_id])
       end
 
       def open_window(_runtime, _window) do
@@ -73,6 +103,10 @@ defmodule GPUI.Native.Facade do
 
       def set_theme(_runtime, _mode) do
         apply(GPUI.Native.Backend.module(), :set_theme, [_runtime, _mode])
+      end
+
+      def load_font(_runtime, _bytes) do
+        apply(GPUI.Native.Backend.module(), :load_font, [_runtime, _bytes])
       end
 
       def put_resource(_runtime, _resource_id, _resource) do
@@ -113,6 +147,19 @@ defmodule GPUI.Native.Facade do
 
       def native_test_click(_session, _target) do
         apply(GPUI.Native.Backend.module(), :native_test_click, [_session, _target])
+      end
+
+      def native_test_double_click(_session, _target) do
+        apply(GPUI.Native.Backend.module(), :native_test_double_click, [_session, _target])
+      end
+
+      def native_test_pinch(_session, _target, _delta, _phase) do
+        apply(GPUI.Native.Backend.module(), :native_test_pinch, [
+          _session,
+          _target,
+          _delta,
+          _phase
+        ])
       end
 
       def native_test_drag(_session, _from_x, _from_y, _to_x, _to_y) do

@@ -14,9 +14,51 @@ defmodule GPUI.Codegen.Native.Event.Contract do
     [
       {:Copy, "components", named, :encode_named_event, [:env, atom(:copy), :window_id, :event]},
       {:Click, nil, named, :encode_named_event, [:env, atom(:click), :window_id, :event]},
+      {:ModifiedClick, nil,
+       named ++
+         [
+           control: quote(do: boolean()),
+           alt: quote(do: boolean()),
+           shift: quote(do: boolean()),
+           platform: quote(do: boolean())
+         ], :encode_modified_click_event,
+       [:env, :window_id, :event, :control, :alt, :shift, :platform]},
+      {:PrimitiveClipboardWrite, nil, named, :encode_named_event,
+       [:env, atom(:clipboard_write), :window_id, :event]},
+      {:PointerState, "real-gpui",
+       named ++
+         [
+           hovered: quote(do: boolean()),
+           control: quote(do: boolean()),
+           alt: quote(do: boolean()),
+           shift: quote(do: boolean()),
+           platform: quote(do: boolean())
+         ], :encode_pointer_state_event,
+       [:env, :window_id, :event, :hovered, :control, :alt, :shift, :platform]},
+      {:LinkHover, "components",
+       named ++
+         [
+           value: quote(do: ElementBoundsGeometry.t()),
+           link: quote(do: RustQ.Type.option(String.t())),
+           hovered: quote(do: boolean())
+         ], :encode_link_hover_event, [:env, :window_id, :event, :value, :link, :hovered]},
       {:Command, nil, named, :encode_named_event, [:env, atom(:command), :window_id, :event]},
       {:Input, nil, [kind: quote(do: InputKind.t())] ++ named ++ [value: value],
        :encode_input_event, [:env, A.ref(:kind), :window_id, :event, :value]},
+      {:ModifiedInput, "components",
+       [kind: quote(do: InputKind.t())] ++
+         named ++
+         [value: value] ++
+         [
+           control: quote(do: boolean()),
+           alt: quote(do: boolean()),
+           shift: quote(do: boolean()),
+           platform: quote(do: boolean())
+         ], :encode_modified_input_event,
+       [:env, A.ref(:kind), :window_id, :event, :value, :control, :alt, :shift, :platform]},
+      {:CapturedKeystroke, "real-gpui",
+       named ++ [value: quote(do: KeyStroke.t()), captured: quote(do: boolean())],
+       :encode_captured_keystroke_event, [:env, :window_id, :event, :value, :captured]},
       {:Keystroke, "real-gpui", named ++ [value: quote(do: KeyStroke.t())],
        :encode_keystroke_event, [:env, :window_id, :event, :value]},
       {:TerminalResize, "real-gpui", named ++ [value: quote(do: TerminalSize.t())],
@@ -48,6 +90,10 @@ defmodule GPUI.Codegen.Native.Event.Contract do
            },
            :window_id
          ]},
+        {:WindowGeometry, nil, window ++ [bounds: quote(do: RustQ.Type.vec(RustQ.Type.f64())), initial: quote(do: boolean())],
+         :encode_window_geometry, [:env, :window_id, A.ref(:bounds), :initial]},
+        {:WindowAppearance, nil, window ++ [dark: quote(do: boolean())],
+         :encode_window_appearance, [:env, :window_id, :dark]},
         {:WindowClosed, nil, window, :encode_window_event,
          [:env, atom(:window_closed), :window_id]},
         {:VirtualRange, "real-gpui",

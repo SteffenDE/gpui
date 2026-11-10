@@ -102,6 +102,13 @@ defmodule GPUI.Runtime do
   def close_window(runtime, window),
     do: GenServer.call(runtime, {:close_window, window}, @call_timeout)
 
+  @doc "Brings a native window to the foreground, restoring it if minimized."
+  @spec activate_window(GenServer.server(), pos_integer()) :: :ok | {:error, term()}
+  def activate_window(runtime, window_id) when is_integer(window_id) and window_id > 0,
+    do: GenServer.call(runtime, {:activate_window, window_id}, @call_timeout)
+
+  def activate_window(_runtime, _window_id), do: {:error, :invalid_window_id}
+
   @doc "Stores a session resource and synchronizes the resulting snapshot."
   @spec put_resource(GenServer.server(), String.Chars.t(), map()) :: :ok | {:error, error()}
   def put_resource(runtime, id, resource),
@@ -123,6 +130,11 @@ defmodule GPUI.Runtime do
           {:ok, GPUI.Snapshot.t()} | {:error, error()}
   def send_view(runtime, window_id, message),
     do: GenServer.call(runtime, {:send_view, window_id, message}, @call_timeout)
+
+  @doc "Changes native controls and application appearance; system follows the OS."
+  @spec set_theme(GenServer.server(), :system | :light | :dark) :: :ok | {:error, term()}
+  def set_theme(runtime, mode) when mode in [:system, :light, :dark],
+    do: GenServer.call(runtime, {:set_theme, mode}, @call_timeout)
 
   @doc "Rerenders every window from its current module and assigns, then synchronizes the display."
   @spec refresh(GenServer.server()) :: {:ok, GPUI.Snapshot.t()} | {:error, error()}
@@ -192,6 +204,11 @@ defmodule GPUI.Runtime do
   end
 
   @impl GenServer
+  def handle_call({:set_theme, mode}, _from, state) do
+    result = GPUI.Display.Support.set_theme(state.display_module, state.display, mode)
+    {:reply, result, state}
+  end
+
   def handle_call(:info, _from, state) do
     windows = GPUI.Session.windows(state.session)
 
@@ -290,6 +307,11 @@ defmodule GPUI.Runtime do
     state.session
     |> GPUI.Session.send_view(window_id, message)
     |> synchronized_snapshot_reply(state)
+  end
+
+  def handle_call({:activate_window, window_id}, _from, state) do
+    reply = GPUI.Display.Support.activate_window(state.display_module, state.display, window_id)
+    {:reply, reply, state}
   end
 
   def handle_call(:refresh, _from, state) do

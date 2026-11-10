@@ -48,13 +48,30 @@ pub fn valid_shortcut(shortcut: &str) -> bool {
     let Some((key, modifiers)) = parts.split_last() else {
         return false;
     };
-    let valid_key = key.len() == 1
-        && key
-            .bytes()
-            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit());
+    let valid_key = matches!(
+        *key,
+        "enter"
+            | "escape"
+            | "tab"
+            | "space"
+            | "backspace"
+            | "delete"
+            | "up"
+            | "down"
+            | "left"
+            | "right"
+            | "home"
+            | "end"
+            | "pageup"
+            | "pagedown"
+    ) || key.len() == 1
+        && key.bytes().all(|byte| {
+            byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || matches!(byte, b'.' | b'/' | b'[' | b']')
+        });
     let expected = ["primary", "ctrl", "alt", "shift"];
     let mut next_modifier = 0;
-    let mut activation_modifier = false;
 
     for modifier in modifiers {
         let Some(index) = expected.iter().position(|expected| expected == modifier) else {
@@ -64,10 +81,9 @@ pub fn valid_shortcut(shortcut: &str) -> bool {
             return false;
         }
         next_modifier = index + 1;
-        activation_modifier |= matches!(*modifier, "primary" | "ctrl" | "alt");
     }
 
-    !modifiers.is_empty() && activation_modifier && valid_key
+    valid_key
 }
 
 #[cfg(test)]
@@ -77,7 +93,14 @@ mod tests {
     #[test]
     fn validates_bounded_canonical_shortcuts() {
         assert!(valid_command("refresh", "primary-shift-r"));
-        assert!(!valid_command("refresh", "shift-r"));
+        assert!(valid_command("refresh", "shift-r"));
+        assert!(valid_command("sidebar", "s"));
+        assert!(valid_command("reviewed", "2"));
+        assert!(valid_command("open", "enter"));
+        assert!(valid_command("next", "down"));
+        assert!(valid_command("cancel", "shift-escape"));
+        assert!(!valid_command("open", "return"));
+        assert!(!valid_command("refresh", "shift-shift-r"));
         assert!(!valid_command("refresh", "shift-primary-r"));
         assert!(!valid_command("refresh", "primary-R"));
     }

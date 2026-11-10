@@ -1,6 +1,11 @@
 defmodule GPUI.Element do
   @moduledoc """
   Serializable element tree produced by `GPUI.View` modules.
+
+  A passive `text` element may set `truncate_start: true` to retain a shaped
+  single-line suffix behind a leading ellipsis. Its full source stays in the
+  payload and accessibility label. This flag defaults to false; ordinary text
+  keeps its existing wrapping and end-truncation behavior.
   """
 
   @type primitive :: String.t() | number() | atom()
@@ -10,6 +15,16 @@ defmodule GPUI.Element do
   defstruct [:type, attrs: [], children: []]
 
   @identified_tags MapSet.new(GPUI.Schema.identified_tags())
+
+  @doc "Sets the root view's reference pixel size for rem units, including native control internals."
+  @spec with_rem_size(t(), number()) :: t()
+  def with_rem_size(%__MODULE__{} = element, rem_size) do
+    if is_number(rem_size) and rem_size > 0 do
+      %__MODULE__{type: :viewport, attrs: [rem_size: rem_size], children: [element]}
+    else
+      raise ArgumentError, "rem_size must be a positive number"
+    end
+  end
 
   @doc "Appends one child to an immutable element value."
   @spec append_child(t(), child()) :: t()
@@ -62,6 +77,10 @@ defmodule GPUI.Element do
     end
   end
 
+  defp validated_primitive_attrs(%__MODULE__{type: :viewport, attrs: attrs}) do
+    attrs |> Map.new() |> GPUI.Schema.validate_component_assigns!(:viewport) |> Map.to_list()
+  end
+
   defp validated_primitive_attrs(%__MODULE__{type: :layer, children: [_child], attrs: attrs}) do
     attrs
     |> Map.new()
@@ -80,16 +99,30 @@ defmodule GPUI.Element do
   end
 
   defp validated_primitive_attrs(%__MODULE__{type: type, attrs: attrs})
-       when type in [:div, :button, :span, :scroll, :list, :item, :input] do
+       when type in [:div, :button, :span, :scroll, :list, :item, :text_input] do
     attrs_map = Map.new(attrs)
     observed? = Map.has_key?(attrs_map, :"phx-bounds-change")
 
     focused? =
       Map.get(attrs_map, :focus_request, 0) > 0 or
-        Map.has_key?(attrs_map, :"phx-focus") or Map.has_key?(attrs_map, :"phx-blur")
+        Map.get(attrs_map, :clipboard_write_request, 0) > 0 or
+        Map.get(attrs_map, :select_all_request, 0) > 0 or
+        Map.has_key?(attrs_map, :"phx-focus") or Map.has_key?(attrs_map, :"phx-blur") or
+        Map.has_key?(attrs_map, :"phx-keyrelease")
 
     motion? = Map.get(attrs_map, :motion_request, 0) > 0
-    declarative_feature? = motion_attrs?(attrs_map) or Map.has_key?(attrs_map, :window_control)
+
+    declarative_feature? =
+      Map.has_key?(attrs_map, :"phx-keycapture") or
+        Map.has_key?(attrs_map, :"phx-window-keyrelease") or
+        Map.has_key?(attrs_map, :"phx-pointer-down") or
+        Map.has_key?(attrs_map, :"phx-window-pointer-position") or
+        Map.has_key?(attrs_map, :"phx-window-pointer-up") or
+        Map.has_key?(attrs_map, :"phx-pointer") or
+        Map.has_key?(attrs_map, :"phx-clipboard-write") or
+        motion_attrs?(attrs_map) or Map.has_key?(attrs_map, :window_control) or
+        Map.has_key?(attrs_map, :capture_keys)
+
     accessible? = GPUI.Accessibility.metadata?(attrs_map)
 
     validate_interactive_feature_id!(type, attrs_map, observed?, focused?, motion?)

@@ -10,8 +10,8 @@ defmodule GPUI.Codegen.Native.Window do
   alias RustQ.Type, as: R
 
   @type chrome :: :system | :content
-  @type lifecycle :: :close_request | :focus | :blur
-  @type theme :: :light | :dark
+  @type lifecycle :: :close_request | :focus | :blur | :appearance | :geometry
+  @type theme :: :system | :light | :dark
 
   @type close_request :: %{
           required(:window_id) => R.u64()
@@ -51,6 +51,10 @@ defmodule GPUI.Codegen.Native.Window do
 
   @spec decode_close(close_request()) :: R.u64()
   defrust(decode_close(request), do: request.window_id)
+
+  @nif schedule: :dirty_io
+  @spec activate_window(R.resource(RuntimeResource.t()), R.u64()) :: R.nif_result(term())
+  defnif(activate_window(runtime, window_id), do: activate_window_impl(nif_env(), runtime, window_id))
 
   @nif schedule: :dirty_io
   @spec open_window(
@@ -122,6 +126,12 @@ defmodule GPUI.Codegen.Native.Window do
     set_theme_impl(nif_env(), runtime, mode)
   end
 
+  @nif schedule: :dirty_io
+  @spec load_font(R.resource(RuntimeResource.t()), binary()) :: R.nif_result(term())
+  defnif load_font(runtime, bytes) do
+    load_font_impl(nif_env(), runtime, bytes)
+  end
+
   @type root :: %{
           required(:tree) => term()
         }
@@ -131,6 +141,9 @@ defmodule GPUI.Codegen.Native.Window do
           required(:title) => String.t(),
           required(:size) => [R.u32()],
           required(:min_size) => R.option([R.u32()]),
+          required(:restore_bounds) => R.option([R.f64()]),
+          required(:cascade_offset) => R.u32(),
+          required(:center_in_work_area) => boolean(),
           required(:resizable) => boolean(),
           required(:chrome) => chrome(),
           required(:lifecycle) => [Lifecycle.t()],
@@ -145,18 +158,23 @@ defmodule GPUI.Codegen.Native.Window do
           required(:height) => R.f32(),
           required(:min_width) => R.option(R.f32()),
           required(:min_height) => R.option(R.f32()),
+          required(:restore_bounds) => R.option([R.f64()]),
+          required(:cascade_offset) => R.u32(),
+          required(:center_in_work_area) => boolean(),
           required(:resizable) => boolean(),
           required(:content_chrome) => boolean(),
           required(:close_request) => boolean(),
           required(:focus) => boolean(),
           required(:blur) => boolean(),
+          required(:appearance) => boolean(),
+          required(:geometry) => boolean(),
           required(:commands) => [{String.t(), String.t()}],
           required(:tree) => term()
         }
 
   @spec decode_update(update_request()) :: R.nif_result({R.u64(), ElementNode.t()})
   defrust decode_update(request) do
-    case decode_element_node(request.tree) do
+    case decode_tree(request.tree) do
       {:ok, tree} -> {:ok, {request.window_id, tree}}
       {:error, reason} -> {:error, reason}
     end
@@ -175,6 +193,11 @@ defmodule GPUI.Codegen.Native.Window do
         focus =
           Enum.any?(decoded.lifecycle.clone(), fn event -> event == lifecycle_focus() end)
 
+        appearance =
+          Enum.any?(decoded.lifecycle.clone(), fn event -> event == lifecycle_appearance() end)
+
+        geometry = Enum.any?(decoded.lifecycle.clone(), fn event -> event == lifecycle_geometry() end)
+
         blur = Enum.any?(decoded.lifecycle, fn event -> event == lifecycle_blur() end)
 
         {:ok,
@@ -185,11 +208,16 @@ defmodule GPUI.Codegen.Native.Window do
            height: cast(deref(height), R.f32()),
            min_width: min_width,
            min_height: min_height,
+           restore_bounds: decoded.restore_bounds,
+           cascade_offset: decoded.cascade_offset,
+           center_in_work_area: decoded.center_in_work_area,
            resizable: decoded.resizable,
            content_chrome: decoded.chrome == chrome_content(),
            close_request: close_request,
            focus: focus,
            blur: blur,
+           appearance: appearance,
+           geometry: geometry,
            commands: decoded.commands,
            tree: decoded.root.tree
          }}

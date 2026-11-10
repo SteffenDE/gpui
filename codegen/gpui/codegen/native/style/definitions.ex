@@ -8,7 +8,14 @@ defmodule GPUI.Codegen.Native.Style.Definitions do
     clauses = Enum.map(specs, &style_clause/1) ++ [{:->, [], [[Macro.var(:_, nil)], false]}]
 
     style_case = {:case, [], [Macro.var(:key, nil), [do: clauses]]}
-    render_statements = specs |> Enum.reject(&is_nil(&1.render)) |> Enum.map(&render_statement/1)
+
+    {hover_specs, ordinary_specs} =
+      specs
+      |> Enum.reject(&is_nil(&1.render))
+      |> Enum.split_with(&match?({:hover, _, :color}, &1.render))
+
+    render_statements =
+      Enum.map(ordinary_specs, &render_statement/1) ++ hover_statements(hover_specs)
 
     quote do
       @type style_attrs :: unquote(fields)
@@ -55,10 +62,49 @@ defmodule GPUI.Codegen.Native.Style.Definitions do
     end
   end
 
+  defp hover_statements([]), do: []
+
+  defp hover_statements(specs) do
+    present =
+      Enum.map(specs, fn spec ->
+        field = spec.field
+        quote(do: style.unquote(field).is_some())
+      end)
+      |> Enum.reduce(fn condition, acc -> quote(do: unquote(acc) or unquote(condition)) end)
+
+    refinements =
+      Enum.map(specs, fn %{field: field, render: {:hover, method, :color}} ->
+        render_option_value_case(field, fn ->
+          quote(do: assign!(refinement, refinement.unquote(method)(GPUI.rgba(value))))
+        end)
+      end)
+
+    [
+      quote do
+        if unquote(present) do
+          assign!(
+            element,
+            element.hover(fn refinement ->
+              refinement = refinement
+              unquote_splicing(refinements)
+              refinement
+            end)
+          )
+        end
+      end
+    ]
+  end
+
   defp style_type_field(spec), do: {required(spec.field), style_field_type(spec.type)}
 
+  defp style_field_type(:box_shadows),
+    do: quote(do: R.option(R.vec(R.path({:gpui_core, :BoxShadowSpec}))))
+
+  defp style_field_type(:boolean), do: quote(do: boolean())
   defp style_field_type({:atom_eq, _expected}), do: quote(do: boolean())
+  defp style_field_type(:group_name), do: quote(do: R.option(String.t()))
   defp style_field_type(:atom_string), do: quote(do: R.option(String.t()))
+  defp style_field_type(:group_color), do: quote(do: R.option({String.t(), R.u32()}))
   defp style_field_type(:color), do: quote(do: R.option(R.u32()))
 
   defp style_field_type(type) when type in [:number, :px, :radius],
@@ -92,13 +138,21 @@ defmodule GPUI.Codegen.Native.Style.Definitions do
      ]}
   end
 
+  defp valid_style_value(:boolean, _value),
+    do: quote(do: atom_eq(term, "true") or atom_eq(term, "false"))
+
   defp valid_style_value({:atom_eq, _expected}, value), do: value
   defp valid_style_value(_type, value), do: quote(do: unquote(value).is_some())
+
+  defp style_decode_call(:box_shadows), do: quote(do: box_shadows_value(term))
+  defp style_decode_call(:boolean), do: quote(do: atom_eq(term, "true"))
 
   defp style_decode_call({:atom_eq, expected}),
     do: quote(do: atom_eq(term, unquote(to_string(expected))))
 
+  defp style_decode_call(:group_name), do: quote(do: group_name_value(term))
   defp style_decode_call(:atom_string), do: quote(do: atom_string(term))
+  defp style_decode_call(:group_color), do: quote(do: group_color_value(term))
   defp style_decode_call(:color), do: quote(do: color_value(term))
   defp style_decode_call(:number), do: quote(do: number_value(term))
   defp style_decode_call(:px), do: quote(do: px_value(term))
@@ -117,6 +171,43 @@ defmodule GPUI.Codegen.Native.Style.Definitions do
     end
   end
 
+  defp render_statement(%{field: field, render: {:if_true, method}}) do
+    style_field = field_access(:style, field)
+    call = {{:., [], [Macro.var(:element, nil), method]}, [], []}
+
+    quote do
+      if unquote(style_field) do
+        assign!(element, unquote(call))
+      end
+    end
+  end
+
+  defp render_statement(%{field: field, render: :box_shadows}) do
+    render_option_value_case(field, fn ->
+      quote do
+        shadows =
+          value.into_iter().rev().map(fn {x, y, blur, spread, color} ->
+            GPUI.BoxShadow.new(GPUI.px(x), GPUI.px(y), GPUI.rgba(color).into()).blur_radius(
+              GPUI.px(blur / 2.0)
+            ).spread_radius(GPUI.px(spread))
+          end).collect()
+
+        assign!(element, element.shadow(shadows))
+      end
+    end)
+  end
+
+  defp render_statement(%{field: field, render: :outer_ring}) do
+    render_option_value_case(field, fn ->
+      quote do
+        assign!(
+          element,
+          element.ring(GPUI.px(style.ring_width.unwrap_or(1.0)), GPUI.rgba(value).into())
+        )
+      end
+    end)
+  end
+
   defp render_statement(%{field: field, render: :truncate_if_true}) do
     style_field = field_access(:style, field)
 
@@ -131,6 +222,19 @@ defmodule GPUI.Codegen.Native.Style.Definitions do
   defp render_statement(%{field: field, render: :group}) do
     render_option_value_case(field, fn ->
       quote(do: assign!(element, element.group(value)))
+    end)
+  end
+
+  defp render_statement(%{field: field, render: :group_hover_background}) do
+    render_option_value_case(field, fn ->
+      quote do
+        {group, color} = value
+
+        assign!(
+          element,
+          element.group_hover(group, fn refinement -> refinement.bg(GPUI.rgba(color)) end)
+        )
+      end
     end)
   end
 
@@ -153,17 +257,6 @@ defmodule GPUI.Codegen.Native.Style.Definitions do
     end)
   end
 
-  defp render_statement(%{field: field, render: {:hover, method, :color}}) do
-    render_option_value_case(field, fn ->
-      quote do
-        assign!(
-          element,
-          element.hover(fn refinement -> refinement.unquote(method)(GPUI.rgba(value)) end)
-        )
-      end
-    end)
-  end
-
   defp render_statement(%{field: field, render: {:enum_methods, values}}) do
     render_option_case(field, values, fn method ->
       quote(do: assign!(element, element.unquote(method)()))
@@ -178,10 +271,10 @@ defmodule GPUI.Codegen.Native.Style.Definitions do
   end
 
   defp render_statement(%{field: field, render: {:option_method, method, unit}})
-       when unit in [:color, :px, :length, :position_length, :flex_basis, :f32] do
+       when unit in [:color, :px, :length, :position_length, :flex_basis, :f32, :string] do
     rendered_value =
       case unit do
-        unit when unit in [:f32, :length, :position_length, :flex_basis] ->
+        unit when unit in [:f32, :length, :position_length, :flex_basis, :string] ->
           Macro.var(:value, nil)
 
         :color ->

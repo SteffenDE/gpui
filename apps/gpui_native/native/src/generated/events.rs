@@ -25,10 +25,21 @@ impl EventValue {
 #[derive(Clone, Copy, Debug)]
 #[allow(dead_code)]
 pub(crate) enum InputKind {
+    Pointer,
+    PointerPosition,
+    PointerDown,
+    ClipboardWrite,
     Bounds,
+    Keycapture,
+    WindowKeyrelease,
+    WindowPointerPosition,
+    WindowPointerUp,
+    Keyrelease,
     Focus,
     Blur,
+    Scroll,
     Transaction,
+    Keystroke,
     Submit,
     Selection,
     Viewport,
@@ -38,7 +49,6 @@ pub(crate) enum InputKind {
     Change,
     KeyDown,
     KeyUp,
-    Keystroke,
     Text,
     Paste,
     Resize,
@@ -48,23 +58,39 @@ pub(crate) enum InputKind {
     DragLeave,
     Drop,
     Clipboard,
-    ClipboardWrite,
     FileRead,
     Select,
+    Inserted,
     Search,
+    Measure,
     Link,
+    LinkHover,
     CellChange,
     Sort,
     Toggle,
+    NavigationChange,
+    SelectionChange,
+    Open,
     Release,
 }
 impl InputKind {
     fn atom(&self) -> Atom {
         match self {
+            Self::Pointer => atoms::pointer(),
+            Self::PointerPosition => atoms::pointer_position(),
+            Self::PointerDown => atoms::pointer_down(),
+            Self::ClipboardWrite => atoms::clipboard_write(),
             Self::Bounds => atoms::bounds(),
+            Self::Keycapture => atoms::keycapture(),
+            Self::WindowKeyrelease => atoms::window_keyrelease(),
+            Self::WindowPointerPosition => atoms::window_pointer_position(),
+            Self::WindowPointerUp => atoms::window_pointer_up(),
+            Self::Keyrelease => atoms::keyrelease(),
             Self::Focus => atoms::focus(),
             Self::Blur => atoms::blur(),
+            Self::Scroll => atoms::scroll(),
             Self::Transaction => atoms::transaction(),
+            Self::Keystroke => atoms::keystroke(),
             Self::Submit => atoms::submit(),
             Self::Selection => atoms::selection(),
             Self::Viewport => atoms::viewport(),
@@ -74,7 +100,6 @@ impl InputKind {
             Self::Change => atoms::change(),
             Self::KeyDown => atoms::keydown(),
             Self::KeyUp => atoms::keyup(),
-            Self::Keystroke => atoms::keystroke(),
             Self::Text => atoms::text(),
             Self::Paste => atoms::paste(),
             Self::Resize => atoms::resize(),
@@ -84,14 +109,19 @@ impl InputKind {
             Self::DragLeave => atoms::drag_leave(),
             Self::Drop => atoms::drop(),
             Self::Clipboard => atoms::clipboard(),
-            Self::ClipboardWrite => atoms::clipboard_write(),
             Self::FileRead => atoms::file_read(),
             Self::Select => atoms::select(),
+            Self::Inserted => atoms::inserted(),
             Self::Search => atoms::search(),
+            Self::Measure => atoms::measure(),
             Self::Link => atoms::link(),
+            Self::LinkHover => atoms::link_hover(),
             Self::CellChange => atoms::cell_change(),
             Self::Sort => atoms::sort(),
             Self::Toggle => atoms::toggle(),
+            Self::NavigationChange => atoms::navigation_change(),
+            Self::SelectionChange => atoms::selection_change(),
+            Self::Open => atoms::open(),
             Self::Release => atoms::release(),
         }
     }
@@ -173,6 +203,53 @@ pub(crate) fn encode_named_event<'a>(
         ],
     )
 }
+pub(crate) fn encode_modified_click_event<'a>(
+    env: Env<'a>,
+    window_id: u64,
+    event: String,
+    control: bool,
+    alt: bool,
+    shift: bool,
+    platform: bool,
+) -> NifResult<Term<'a>> {
+    let modifiers = encode_event_map(
+        env,
+        vec![
+            (atoms::control(), control.encode(env)), (atoms::alt(), alt.encode(env)),
+            (atoms::shift(), shift.encode(env)), (atoms::platform(), platform
+            .encode(env))
+        ],
+    )?;
+    encode_event_map(
+        env,
+        vec![
+            (atoms::type_atom(), atoms::click().to_term(env)), (atoms::window_id(),
+            window_id.encode(env)), (atoms::event(), event.encode(env)),
+            (atoms::modifiers(), modifiers)
+        ],
+    )
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_pointer_state_event<'a>(
+    env: Env<'a>,
+    window_id: u64,
+    event: String,
+    hovered: bool,
+    control: bool,
+    alt: bool,
+    shift: bool,
+    platform: bool,
+) -> NifResult<Term<'a>> {
+    let value = encode_event_map(
+        env,
+        vec![
+            (atoms::hovered(), hovered.encode(env)), (atoms::control(), control
+            .encode(env)), (atoms::alt(), alt.encode(env)), (atoms::shift(), shift
+            .encode(env)), (atoms::platform(), platform.encode(env))
+        ],
+    )?;
+    encode_value_event(env, atoms::pointer(), window_id, event, value)
+}
 pub(crate) fn encode_window_event<'a>(
     env: Env<'a>,
     kind: Atom,
@@ -183,6 +260,42 @@ pub(crate) fn encode_window_event<'a>(
         vec![
             (atoms::type_atom(), kind.to_term(env)), (atoms::window_id(), window_id
             .encode(env))
+        ],
+    )
+}
+pub(crate) fn encode_window_appearance<'a>(
+    env: Env<'a>,
+    window_id: u64,
+    dark: bool,
+) -> NifResult<Term<'a>> {
+    let value = if dark { atoms::dark() } else { atoms::light() };
+    encode_event_map(
+        env,
+        vec![
+            (atoms::type_atom(), atoms::window_appearance().to_term(env)),
+            (atoms::window_id(), window_id.encode(env)), (atoms::value(), value
+            .to_term(env))
+        ],
+    )
+}
+pub(crate) fn encode_window_geometry<'a>(
+    env: Env<'a>,
+    window_id: u64,
+    bounds: &Vec<f64>,
+    initial: bool,
+) -> NifResult<Term<'a>> {
+    let value = encode_event_map(
+        env,
+        vec![
+            (atoms::bounds(), bounds.encode(env)), (atoms::initial(), initial
+            .encode(env))
+        ],
+    )?;
+    encode_event_map(
+        env,
+        vec![
+            (atoms::type_atom(), atoms::window_geometry().to_term(env)),
+            (atoms::window_id(), window_id.encode(env)), (atoms::value(), value)
         ],
     )
 }
@@ -224,6 +337,19 @@ pub(crate) fn encode_keystroke_event<'a>(
     value: KeyStroke,
 ) -> NifResult<Term<'a>> {
     encode_value_event(env, atoms::keystroke(), window_id, event, value.encode(env))
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn encode_captured_keystroke_event<'a>(
+    env: Env<'a>,
+    window_id: u64,
+    event: String,
+    value: KeyStroke,
+    captured: bool,
+) -> NifResult<Term<'a>> {
+    let encoded = value
+        .encode(env)
+        .map_put(atoms::captured().to_term(env), captured.encode(env))?;
+    encode_value_event(env, atoms::keystroke(), window_id, event, encoded)
 }
 #[cfg(feature = "real-gpui")]
 pub(crate) fn encode_terminal_resize_event<'a>(
@@ -268,6 +394,53 @@ pub(crate) fn encode_missing_resource_event<'a>(
             (atoms::resource_type(), atoms::raster().to_term(env))
         ],
     )
+}
+#[cfg(feature = "components")]
+pub(crate) fn encode_link_hover_event<'a>(
+    env: Env<'a>,
+    window_id: u64,
+    event: String,
+    value: ElementBoundsGeometry,
+    link: Option<String>,
+    hovered: bool,
+) -> NifResult<Term<'a>> {
+    let encoded = value
+        .encode(env)
+        .map_put(atoms::link().to_term(env), link.encode(env))?;
+    let encoded = encoded.map_put(atoms::hovered().to_term(env), hovered.encode(env))?;
+    encode_value_event(env, atoms::link_hover(), window_id, event, encoded)
+}
+#[cfg(feature = "components")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn encode_modified_input_event<'a>(
+    env: Env<'a>,
+    kind: &InputKind,
+    window_id: u64,
+    event: String,
+    value: Option<EventValue>,
+    control: bool,
+    alt: bool,
+    shift: bool,
+    platform: bool,
+) -> NifResult<Term<'a>> {
+    let modifiers = encode_event_map(
+        env,
+        vec![
+            (atoms::control(), control.encode(env)), (atoms::alt(), alt.encode(env)),
+            (atoms::shift(), shift.encode(env)), (atoms::platform(), platform
+            .encode(env))
+        ],
+    )?;
+    let entries = vec![
+        (atoms::type_atom(), kind.atom().to_term(env)), (atoms::window_id(), window_id
+        .encode(env)), (atoms::event(), event.encode(env)), (atoms::modifiers(),
+        modifiers)
+    ];
+    let entries = match value {
+        None => entries,
+        Some(value) => append_event_value(entries, env, value),
+    };
+    encode_event_map(env, entries)
 }
 #[cfg(feature = "components")]
 pub(crate) fn encode_clipboard_event<'a>(

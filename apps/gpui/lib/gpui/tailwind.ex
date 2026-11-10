@@ -12,6 +12,29 @@ defmodule GPUI.Tailwind do
   @cache_limit 4_096
   @spacing_unit 4.0
 
+  @shadows %{
+    "none" => [],
+    "2xs" => [{0.0, 1.0, 0.0, 0.0, {:rgba, 0x0000000D}}],
+    "xs" => [{0.0, 1.0, 2.0, 0.0, {:rgba, 0x0000000D}}],
+    "sm" => [
+      {0.0, 1.0, 3.0, 0.0, {:rgba, 0x0000001A}},
+      {0.0, 1.0, 2.0, -1.0, {:rgba, 0x0000001A}}
+    ],
+    "md" => [
+      {0.0, 4.0, 6.0, -1.0, {:rgba, 0x0000001A}},
+      {0.0, 2.0, 4.0, -2.0, {:rgba, 0x0000001A}}
+    ],
+    "lg" => [
+      {0.0, 10.0, 15.0, -3.0, {:rgba, 0x0000001A}},
+      {0.0, 4.0, 6.0, -4.0, {:rgba, 0x0000001A}}
+    ],
+    "xl" => [
+      {0.0, 20.0, 25.0, -5.0, {:rgba, 0x0000001A}},
+      {0.0, 8.0, 10.0, -6.0, {:rgba, 0x0000001A}}
+    ],
+    "2xl" => [{0.0, 25.0, 50.0, -12.0, {:rgba, 0x00000040}}]
+  }
+
   @text_sizes %{
     "xs" => 12.0,
     "sm" => 14.0,
@@ -90,12 +113,19 @@ defmodule GPUI.Tailwind do
       [{^classes, result}] -> {:ok, result}
       [] -> :error
     end
+  rescue
+    # The first caller owns this optional cache and may exit between discovery
+    # and lookup. Rendering must still normalize classes without the cache.
+    ArgumentError -> :error
   end
 
   defp cache(classes, result) do
     table = ensure_cache()
     if :ets.info(table, :size) < @cache_limit, do: :ets.insert(table, {classes, result})
     result
+  rescue
+    # The owner may also exit between the size check and insertion.
+    ArgumentError -> result
   end
 
   defp ensure_cache do
@@ -123,13 +153,20 @@ defmodule GPUI.Tailwind do
   defp normalize_class("group-hover:invisible", acc),
     do: put_style(acc, :group_hover_invisible, :group)
 
+  defp normalize_class("group-hover:bg-" <> color, acc),
+    do: group_color(acc, "group", color, "group-hover:bg-" <> color)
+
   defp normalize_class("group-hover/" <> rest = class, acc) do
     case String.split(rest, ":", parts: 2) do
       [name, "visible"] -> group(acc, :group_hover_visible, name, class)
       [name, "invisible"] -> group(acc, :group_hover_invisible, name, class)
+      [name, "bg-" <> color] -> group_color(acc, name, color, class)
       _other -> unknown(acc, class)
     end
   end
+
+  defp normalize_class("hover:text-" <> color, acc),
+    do: color(acc, :hover_color, color, "hover:text-")
 
   defp normalize_class("hover:bg-" <> color, acc),
     do: color(acc, :hover_background, color, "hover:bg-")
@@ -177,6 +214,23 @@ defmodule GPUI.Tailwind do
   defp normalize_class("text-left", acc), do: put_style(acc, :text_align, :left)
   defp normalize_class("text-center", acc), do: put_style(acc, :text_align, :center)
   defp normalize_class("text-right", acc), do: put_style(acc, :text_align, :right)
+
+  defp normalize_class("shadow-" <> size = class, acc) do
+    case Map.fetch(@shadows, size) do
+      {:ok, layers} -> put_style(acc, :box_shadow, layers)
+      :error -> unknown(acc, class)
+    end
+  end
+
+  defp normalize_class("ring", acc), do: put_style(acc, :ring_width, {:px, 1.0})
+
+  defp normalize_class("ring-" <> value, acc) do
+    case Integer.parse(value) do
+      {width, ""} when width >= 0 -> put_style(acc, :ring_width, {:px, width * 1.0})
+      _ -> color(acc, :ring_color, value, "ring-")
+    end
+  end
+
   defp normalize_class("truncate", acc), do: put_style(acc, :truncate, true)
   defp normalize_class("cursor-default", acc), do: put_style(acc, :cursor, :default)
   defp normalize_class("cursor-pointer", acc), do: put_style(acc, :cursor, :pointer)
@@ -188,6 +242,10 @@ defmodule GPUI.Tailwind do
   defp normalize_class("font-medium", acc), do: put_style(acc, :font_weight, :medium)
   defp normalize_class("font-semibold", acc), do: put_style(acc, :font_weight, :semibold)
   defp normalize_class("font-bold", acc), do: put_style(acc, :font_weight, :bold)
+  defp normalize_class("border-t", acc), do: put_style(acc, :border_top_width, {:px, 1.0})
+  defp normalize_class("border-r", acc), do: put_style(acc, :border_right_width, {:px, 1.0})
+  defp normalize_class("border-b", acc), do: put_style(acc, :border_bottom_width, {:px, 1.0})
+  defp normalize_class("border-l", acc), do: put_style(acc, :border_left_width, {:px, 1.0})
   defp normalize_class("border", acc), do: put_style(acc, :border_width, {:px, 1.0})
   defp normalize_class("border-" <> color, acc), do: color(acc, :border_color, color, "border-")
 
@@ -265,17 +323,15 @@ defmodule GPUI.Tailwind do
   defp normalize_class(class, acc), do: unknown(acc, class)
 
   defp text(value, acc) do
-    cond do
-      Map.has_key?(@text_sizes, value) ->
-        put_style(acc, :font_size, {:px, Map.fetch!(@text_sizes, value)})
+    size =
+      Map.get_lazy(@text_sizes, value, fn ->
+        case parse_arbitrary_px(value) do
+          {:ok, px} -> px
+          _ -> nil
+        end
+      end)
 
-      match?({:ok, _value}, parse_arbitrary_px(value)) ->
-        {:ok, px} = parse_arbitrary_px(value)
-        put_style(acc, :font_size, {:px, px})
-
-      true ->
-        color(acc, :color, value, "text-")
-    end
+    if size, do: put_style(acc, :font_size, {:px, size}), else: color(acc, :color, value, "text-")
   end
 
   defp line_height(value, acc) do
@@ -303,11 +359,21 @@ defmodule GPUI.Tailwind do
     end
   end
 
-  # Group names become atoms, so only short identifiers are accepted.
+  # Keep group names as bounded strings; class input must never create atoms.
   defp group(acc, key, name, class) do
     if String.match?(name, ~r/\A[a-z][a-z0-9_-]{0,31}\z/),
-      do: put_style(acc, key, String.to_atom(name)),
+      do: put_style(acc, key, name),
       else: unknown(acc, class)
+  end
+
+  defp group_color(acc, name, value, class) do
+    with true <- String.match?(name, ~r/\A[a-z][a-z0-9_-]{0,31}\z/),
+         %{style: [background: color], unknown: []} <-
+           color(%{style: [], unknown: []}, :background, value, "bg-") do
+      put_style(acc, :group_hover_background, {name, color})
+    else
+      _other -> unknown(acc, class)
+    end
   end
 
   defp color(acc, key, value, prefix) do

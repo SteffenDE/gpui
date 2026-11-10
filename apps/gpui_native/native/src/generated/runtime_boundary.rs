@@ -16,6 +16,38 @@ fn set_app_identity<'a>(
 }
 #[rustler::nif(schedule = "DirtyIo")]
 #[allow(unused_variables)]
+fn system_notification_status<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
+    system_notification_status_impl(env)
+}
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(unused_variables)]
+fn request_system_notifications<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
+    request_system_notifications_impl(env)
+}
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(unused_variables)]
+fn show_system_notification<'a>(
+    env: Env<'a>,
+    tag: String,
+    title: String,
+    subtitle: String,
+    body: String,
+    sound: bool,
+) -> NifResult<Term<'a>> {
+    show_system_notification_impl(env, tag, title, subtitle, body, sound)
+}
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(unused_variables)]
+fn dismiss_system_notification<'a>(env: Env<'a>, tag: String) -> NifResult<Term<'a>> {
+    dismiss_system_notification_impl(env, tag)
+}
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(unused_variables)]
+fn subscribe_system_notifications<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
+    subscribe_system_notifications_impl(env)
+}
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(unused_variables)]
 fn start_runtime<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
     start_runtime_impl(env)
 }

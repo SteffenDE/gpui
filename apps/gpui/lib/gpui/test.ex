@@ -180,6 +180,16 @@ defmodule GPUI.Test do
   @spec click(GPUI.Test.UI.t(), String.t() | {number(), number()}) :: GPUI.Test.UI.t()
   def click(%GPUI.Test.UI{} = ui, target), do: GPUI.Test.NativeSession.click(ui, target)
 
+  @doc "Sends a native double-click to the center of a stable target."
+  @spec double_click(GPUI.Test.UI.t(), String.t()) :: GPUI.Test.UI.t()
+  def double_click(%GPUI.Test.UI{} = ui, target),
+    do: GPUI.Test.NativeSession.double_click(ui, target)
+
+  @doc "Sends a native relative pinch delta and optional touch phase to a stable target."
+  @spec pinch(GPUI.Test.UI.t(), String.t(), keyword()) :: GPUI.Test.UI.t()
+  def pinch(%GPUI.Test.UI{} = ui, target, opts),
+    do: GPUI.Test.NativeSession.pinch(ui, target, opts)
+
   @doc "Scrolls a stable target by a bounded logical-pixel delta."
   @spec scroll(GPUI.Test.UI.t(), String.t(), keyword()) :: GPUI.Test.UI.t()
   def scroll(%GPUI.Test.UI{} = ui, target, opts),

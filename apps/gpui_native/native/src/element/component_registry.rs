@@ -1,6 +1,7 @@
 use super::component::code_viewer::ComponentCodeViewer;
 use super::component::data_table::ComponentDataTable;
 use super::component::drop_target::ComponentDropTarget;
+use super::component::pan_zoom::ComponentPanZoom;
 use super::component::rich_text::ComponentRichText;
 use super::component::tree::ComponentTree;
 use super::component::virtual_collection::ComponentVirtualCollection;
@@ -157,6 +158,8 @@ pub(crate) struct ComponentInput {
     pub(crate) binding: SharedBinding<String>,
     pub(crate) submit_event: SharedEvent,
     pub(crate) focus_request: u64,
+    pub(crate) insert_request: u64,
+    pub(crate) suppressed_changes: Arc<Mutex<usize>>,
     pub(crate) placeholder: String,
     pub(crate) masked: bool,
     pub(crate) loading: bool,
@@ -183,10 +186,13 @@ pub(crate) struct ComponentCombobox {
 pub(crate) struct DialogConfig {
     pub(crate) title: String,
     pub(crate) show_title: bool,
+    pub(crate) fullscreen: bool,
     pub(crate) width: f32,
     pub(crate) margin_top: Option<f32>,
+    pub(crate) margin_top_ratio: Option<f32>,
     pub(crate) overlay: bool,
     pub(crate) closable: bool,
+    pub(crate) pointer_dismiss: bool,
     pub(crate) keyboard: bool,
     pub(crate) close_button: bool,
     pub(crate) style: crate::StyleAttrs,
@@ -207,12 +213,25 @@ pub(crate) struct ComponentDialog {
     pub(crate) config: Arc<Mutex<DialogConfig>>,
     pub(crate) content: gpui::Entity<crate::ElixirRoot>,
     pub(crate) content_state: crate::SharedWindow,
+    pub(crate) _resize: gpui::Subscription,
+}
+
+#[derive(Default)]
+pub(crate) struct PopoverHoverState {
+    pub(crate) trigger: bool,
+    pub(crate) content: bool,
+    pub(crate) generation: u64,
+    pub(crate) content_bounds: Option<gpui::Bounds<gpui::Pixels>>,
+    pub(crate) trigger_bounds: Option<gpui::Bounds<gpui::Pixels>>,
 }
 
 pub(crate) struct ComponentPopover {
+    pub(crate) restore_trigger_after_escape: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) overlay: ComponentOverlayState,
     pub(crate) previous_focus: Option<gpui::FocusHandle>,
     pub(crate) rendered_open: bool,
+    pub(crate) hover: Arc<Mutex<PopoverHoverState>>,
+    pub(crate) escape: Option<gpui::Subscription>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

@@ -40,10 +40,19 @@ struct VisibleTree {
     total_count: usize,
     overscan: usize,
     selected: Option<String>,
+    multiple: bool,
+    selection_items: Arc<Vec<String>>,
+    selection_event: Option<String>,
+    navigation_event: Option<String>,
+    selected_background: gpui::Hsla,
     change_event: String,
+    open_event: Option<String>,
     toggle_event: String,
     range_event: Option<String>,
     item_height: f32,
+    toggle_on_click: bool,
+    select_on_navigation: bool,
+    focus_color: u32,
 }
 
 #[cfg(feature = "components")]
@@ -68,6 +77,8 @@ pub(crate) fn render(
         uniform_list, InteractiveElement, IntoElement, ParentElement, Role,
         StatefulInteractiveElement, Styled,
     };
+
+    use gpui_component::ActiveTheme;
 
     let items = node
         .children
@@ -139,6 +150,27 @@ pub(crate) fn render(
     );
     component.reconcile_reveal(reveal, node.reveal_strategy.as_deref());
     component.reset_range_without_event(node.range.as_deref());
+    let selection_items = Arc::new(if node.selection_items.is_empty() {
+        keys.iter()
+            .filter(|item| !item.disabled)
+            .map(|item| item.id.clone())
+            .collect::<Vec<_>>()
+    } else {
+        node.selection_items.clone()
+    });
+    let navigation = component.tree_navigation.clone();
+    if let Ok(mut navigation) = navigation.lock() {
+        if navigation.selected != node.selected {
+            navigation.selected = node.selected.clone();
+            if !node.multiple || node.selected.is_some() {
+                navigation.focused = node.selected.clone();
+                navigation.group.anchor = node.selected.clone();
+            }
+        }
+        if node.multiple {
+            navigation.group.ids = node.selected_items.clone();
+        }
+    }
     let scroll_handle = component.scroll_handle.clone();
     let focus_handle = component.focus_handle.clone();
 
@@ -149,10 +181,23 @@ pub(crate) fn render(
         total_count,
         overscan,
         selected: node.selected.clone(),
+        multiple: node.multiple,
+        selection_items: selection_items.clone(),
+        selection_event: node.selection_change.clone(),
+        navigation_event: node.navigation_change.clone(),
+        selected_background: node
+            .style
+            .selected_background
+            .map(|color| gpui::rgba(color).into())
+            .unwrap_or_else(|| context.cx.theme().accent),
         change_event: node.change.clone().unwrap_or_default(),
+        open_event: node.open.clone(),
         toggle_event: node.toggle.clone().unwrap_or_default(),
         range_event: node.range.clone(),
         item_height: (node.item_height as f32).max(1.0),
+        toggle_on_click: node.toggle_on_click,
+        select_on_navigation: node.select_on_navigation,
+        focus_color: node.style.focus_outline_color.unwrap_or(0x656D78FF),
     };
     let processor = context.cx.processor(move |root, range, window, cx| {
         render_visible(root, &visible_tree, range, window, cx)
@@ -165,8 +210,20 @@ pub(crate) fn render(
     let key_items = keys.clone();
     let key_scroll = scroll_handle.clone();
     let disabled = node.disabled;
-    let selected_for_keys = selected_index
-        .and_then(|selected_index| keys.iter().position(|key| key.index == selected_index));
+    let select_on_navigation = node.select_on_navigation;
+    let toggle_on_click = node.toggle_on_click;
+    let multiple = node.multiple;
+    let selection_event = node.selection_change.clone();
+    let navigation_event = node.navigation_change.clone();
+    let open_event = node.open.clone();
+    let selected_for_keys = if select_on_navigation {
+        selected_index.and_then(|index| keys.iter().position(|key| key.index == index))
+    } else {
+        navigation.lock().ok().and_then(|navigation| {
+            keys.iter()
+                .position(|key| Some(&key.id) == navigation.focused.as_ref())
+        })
+    };
 
     let container = apply_generated_render_styles(gpui::div(), node.style).id(node.id.clone());
     crate::element::register_test_target(
@@ -182,26 +239,168 @@ pub(crate) fn render(
         if disabled {
             return;
         }
-        let Some(action) = key_action(
-            event.keystroke.key.as_str(),
-            &key_items,
-            selected_for_keys,
-            total_count,
-        ) else {
+        let key = event.keystroke.key.as_str();
+        let modifiers = event.keystroke.modifiers;
+        if multiple && (modifiers.control || modifiers.platform) && (key == "a" || key == "space") {
+            let ids = if let Ok(mut navigation) = navigation.lock() {
+                let focused = navigation.focused.clone();
+                if key == "a" {
+                    navigation.group.all(&selection_items, focused);
+                } else if let Some(focused) = focused {
+                    navigation.group.toggle(&focused);
+                }
+                navigation.keyboard = true;
+                navigation.group.ids.clone()
+            } else {
+                return;
+            };
+            emit_selection(&runtime, window_id, selection_event.as_deref(), &ids);
+            if let Some(last) = ids.last() {
+                super::uniform_collection::emit_change(
+                    &runtime,
+                    window_id,
+                    Some(&change_event),
+                    last,
+                );
+            }
+            window.refresh();
+            cx.stop_propagation();
+            return;
+        }
+        if multiple && modifiers.platform && key == "enter" {
+            if let Some(open) = open_event.as_deref() {
+                if let Some(position) = selected_for_keys {
+                    emit_open(
+                        &runtime,
+                        window_id,
+                        open,
+                        &key_items[position].id,
+                        modifiers,
+                    );
+                }
+                cx.stop_propagation();
+                return;
+            }
+        }
+        let key = if !select_on_navigation
+            && key == "right"
+            && selected_for_keys.is_some_and(|position| !key_items[position].branch)
+        {
+            "down"
+        } else {
+            key
+        };
+        let Some(action) = key_action(key, &key_items, selected_for_keys, total_count) else {
             return;
         };
         match action {
             TreeAction::Select(position) => {
                 let item = &key_items[position];
-                super::uniform_collection::emit_change(
-                    &runtime,
-                    window_id,
-                    Some(change_event.as_str()),
-                    &item.id,
-                );
+                let moved = if let Ok(mut navigation) = navigation.lock() {
+                    let moved = navigation.focused.as_ref() != Some(&item.id);
+                    navigation.focused = Some(item.id.clone());
+                    navigation.keyboard = true;
+                    moved
+                } else {
+                    false
+                };
+                if moved {
+                    super::uniform_collection::emit_change(
+                        &runtime,
+                        window_id,
+                        navigation_event.as_deref(),
+                        &item.id,
+                    );
+                }
+                let activate = matches!(key, "enter" | "space");
+                if multiple
+                    && (select_on_navigation
+                        || activate
+                        || (modifiers.shift && matches!(key, "up" | "down")))
+                {
+                    let ids = if let Ok(mut navigation) = navigation.lock() {
+                        if !activate && modifiers.shift {
+                            if let Some(current) =
+                                selected_for_keys.map(|position| &key_items[position].id)
+                            {
+                                navigation.group.step(current, &item.id);
+                            }
+                        } else if modifiers.shift {
+                            navigation.group.range(
+                                &item.id,
+                                &selection_items,
+                                modifiers.control || modifiers.platform,
+                            );
+                        } else if activate && (modifiers.control || modifiers.platform) {
+                            navigation.group.toggle(&item.id);
+                        } else {
+                            navigation.group.single(&item.id);
+                        }
+                        navigation.group.ids.clone()
+                    } else {
+                        return;
+                    };
+                    emit_selection(&runtime, window_id, selection_event.as_deref(), &ids);
+                    if let Some(last) = ids.last() {
+                        super::uniform_collection::emit_change(
+                            &runtime,
+                            window_id,
+                            Some(&change_event),
+                            last,
+                        );
+                    }
+                    if activate && ids.last() != Some(&item.id) {
+                        super::uniform_collection::emit_change(
+                            &runtime,
+                            window_id,
+                            Some(&change_event),
+                            &item.id,
+                        );
+                    }
+                    if !activate {
+                        key_scroll.scroll_to_item(item.index, gpui::ScrollStrategy::Nearest);
+                        window.refresh();
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+                if (select_on_navigation || activate) && !multiple {
+                    super::uniform_collection::emit_change(
+                        &runtime,
+                        window_id,
+                        Some(change_event.as_str()),
+                        &item.id,
+                    );
+                    if activate && item.branch && toggle_on_click {
+                        super::uniform_collection::emit_change(
+                            &runtime,
+                            window_id,
+                            Some(toggle_event.as_str()),
+                            &item.id,
+                        );
+                    }
+                }
+                if multiple
+                    && activate
+                    && item.branch
+                    && toggle_on_click
+                    && !modifiers.shift
+                    && !modifiers.control
+                    && !modifiers.platform
+                {
+                    super::uniform_collection::emit_change(
+                        &runtime,
+                        window_id,
+                        Some(&toggle_event),
+                        &item.id,
+                    );
+                }
                 key_scroll.scroll_to_item(item.index, gpui::ScrollStrategy::Nearest);
             }
             TreeAction::Toggle(position) => {
+                if let Ok(mut navigation) = navigation.lock() {
+                    navigation.keyboard = true;
+                }
                 super::uniform_collection::emit_change(
                     &runtime,
                     window_id,
@@ -244,6 +443,7 @@ fn render_visible(
     let Some(component) = root.components.tree_mut(tree_id) else {
         return Vec::new();
     };
+    let navigation = component.tree_navigation.clone();
     let requested_range = range.start.saturating_sub(tree.overscan)
         ..range
             .end
@@ -265,6 +465,14 @@ fn render_visible(
     let mut active_input_ids = HashSet::new();
     let mut rendered = Vec::new();
 
+    let selected_items: HashSet<String> = if tree.multiple {
+        navigation
+            .lock()
+            .map(|state| state.group.ids.iter().cloned().collect())
+            .unwrap_or_default()
+    } else {
+        HashSet::new()
+    };
     for index in range {
         let item = index
             .checked_sub(tree.offset)
@@ -275,16 +483,25 @@ fn render_visible(
             continue;
         };
         let item_id = item.id.clone();
-        let selected = tree.selected.as_deref() == Some(item.id.as_str());
+        let selected = if tree.multiple {
+            selected_items.contains(&item.id)
+        } else {
+            tree.selected.as_deref() == Some(item.id.as_str())
+        };
         let item_runtime = runtime.clone();
         let item_focus = component.focus_handle.clone();
         let select_event = tree.change_event.clone();
+        let open_event = tree.open_event.clone();
         let toggle_event = tree.toggle_event.clone();
         let event_id = item.id.clone();
         let branch = item.branch;
         let item_element_id = format!("gpui-elixir-tree-item-{window_id}-{tree_id}-{item_id}");
         let children = {
             let mut item_context = ElementRenderContext {
+                pointer_observers: root.pointer_observers.clone(),
+                scrolls: root.scrolls.clone(),
+                horizontal_groups: root.horizontal_groups.clone(),
+                tooltip_focus_owner: None,
                 runtime: runtime.clone(),
                 window_id,
                 next_element_id: 0,
@@ -308,6 +525,9 @@ fn render_visible(
             .aria_level(item.level)
             .aria_selected(selected)
             .children(children);
+        if tree.multiple && selected {
+            element = element.bg(tree.selected_background).rounded(gpui::px(5.));
+        }
         if let Some(position) = item.position {
             element = element.aria_position_in_set(position);
         }
@@ -317,25 +537,110 @@ fn render_visible(
         if item.branch {
             element = element.aria_expanded(item.expanded);
         }
-        if selected {
+        let (focused, keyboard) = navigation
+            .lock()
+            .map(|navigation| {
+                (
+                    navigation.focused.as_ref() == Some(&item.id),
+                    navigation.keyboard,
+                )
+            })
+            .unwrap_or_default();
+        if (tree.select_on_navigation && selected) || (!tree.select_on_navigation && focused) {
             element = element.aria_active_descendant();
         }
+        if !tree.select_on_navigation && focused && keyboard && item_focus.is_focused(window) {
+            element = element.relative().child(
+                gpui::div()
+                    .absolute()
+                    .inset_0()
+                    .rounded(gpui::px(5.0))
+                    .border_1()
+                    .border_color(gpui::rgba(tree.focus_color)),
+            );
+        }
+        let item_navigation = navigation.clone();
+        let toggle_on_click = tree.toggle_on_click;
+        let multiple = tree.multiple;
+        let selection_items = tree.selection_items.clone();
+        let selection_event = tree.selection_event.clone();
+        let navigation_event = tree.navigation_event.clone();
         if !item.disabled {
             element = element.cursor(gpui::CursorStyle::PointingHand).on_click(
                 move |event, window, cx| {
+                    if event.modifiers().secondary() {
+                        if let Some(open) = open_event.as_deref() {
+                            emit_open(&item_runtime, window_id, open, &event_id, event.modifiers());
+                            cx.stop_propagation();
+                            return;
+                        }
+                    }
                     item_focus.focus(window, cx);
-                    if branch && event.click_count() == 2 {
+                    let moved = if let Ok(mut navigation) = item_navigation.lock() {
+                        let moved = navigation.focused.as_ref() != Some(&event_id);
+                        navigation.focused = Some(event_id.clone());
+                        navigation.keyboard = false;
+                        moved
+                    } else {
+                        false
+                    };
+                    if moved {
                         super::uniform_collection::emit_change(
                             &item_runtime,
                             window_id,
-                            Some(toggle_event.as_str()),
+                            navigation_event.as_deref(),
                             &event_id,
                         );
-                    } else {
+                    }
+                    if multiple {
+                        let ids = if let Ok(mut navigation) = item_navigation.lock() {
+                            let modifiers = event.modifiers();
+                            if modifiers.shift {
+                                navigation.group.range(
+                                    &event_id,
+                                    &selection_items,
+                                    modifiers.control || modifiers.platform,
+                                );
+                            } else if modifiers.control || modifiers.platform {
+                                navigation.group.toggle(&event_id);
+                            } else {
+                                navigation.group.single(&event_id);
+                            }
+                            navigation.group.ids.clone()
+                        } else {
+                            return;
+                        };
+                        emit_selection(&item_runtime, window_id, selection_event.as_deref(), &ids);
+                        if let Some(last) = ids.last().filter(|last| *last != &event_id) {
+                            super::uniform_collection::emit_change(
+                                &item_runtime,
+                                window_id,
+                                Some(&select_event),
+                                last,
+                            );
+                        }
+                    }
+                    let toggle = branch
+                        && if toggle_on_click {
+                            !event.modifiers().shift
+                                && !event.modifiers().control
+                                && !event.modifiers().platform
+                        } else {
+                            event.click_count() == 2
+                        };
+                    if !toggle || toggle_on_click {
                         super::uniform_collection::emit_change(
                             &item_runtime,
                             window_id,
                             Some(select_event.as_str()),
+                            &event_id,
+                        );
+                    }
+                    if toggle {
+                        super::uniform_collection::emit_change(
+                            &item_runtime,
+                            window_id,
+                            Some(toggle_event.as_str()),
                             &event_id,
                         );
                     }
@@ -360,6 +665,50 @@ fn render_visible(
         });
     }
     rendered
+}
+
+#[cfg(feature = "components")]
+fn emit_selection(
+    runtime: &crate::SharedRuntime,
+    window_id: u64,
+    event: Option<&str>,
+    ids: &[String],
+) {
+    let Some(event) = event.filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let _ = crate::push_event(
+        runtime,
+        crate::NativeEvent::Input {
+            kind: crate::InputKind::Change,
+            window_id,
+            event: event.to_string(),
+            value: Some(crate::EventValue::Strings(ids.to_vec())),
+        },
+    );
+}
+
+#[cfg(feature = "components")]
+fn emit_open(
+    runtime: &crate::SharedRuntime,
+    window_id: u64,
+    event: &str,
+    value: &str,
+    modifiers: gpui::Modifiers,
+) {
+    let _ = crate::push_event(
+        runtime,
+        crate::NativeEvent::ModifiedInput {
+            kind: crate::InputKind::Open,
+            window_id,
+            event: event.to_string(),
+            value: Some(crate::EventValue::String(value.to_string())),
+            control: modifiers.control,
+            alt: modifiers.alt,
+            shift: modifiers.shift,
+            platform: modifiers.platform,
+        },
+    );
 }
 
 #[cfg(feature = "components")]
@@ -466,6 +815,29 @@ pub(crate) fn render_item(
 
 #[cfg(all(test, feature = "components"))]
 mod tests {
+    #[cfg(feature = "components")]
+    #[test]
+    fn open_event_preserves_target_and_pointer_modifiers() {
+        let runtime = std::sync::Arc::new(crate::runtime::RuntimeState::new());
+        super::emit_open(
+            &runtime,
+            7,
+            "open-file",
+            "file-id",
+            crate::gpui::Modifiers {
+                platform: true,
+                shift: true,
+                ..Default::default()
+            },
+        );
+        let events = runtime.events.lock().unwrap();
+        assert!(matches!(&events[0], crate::NativeEvent::ModifiedInput {
+            kind: crate::InputKind::Open, window_id: 7, event,
+            value: Some(crate::EventValue::String(value)), platform: true, shift: true,
+            control: false, alt: false,
+        } if event == "open-file" && value == "file-id"));
+    }
+
     use super::*;
 
     fn key(

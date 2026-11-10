@@ -34,11 +34,35 @@ defmodule GPUI.Native.Generated do
         :erlang.nif_error(:nif_not_loaded)
       end
 
+      def system_notification_status do
+        :erlang.nif_error(:nif_not_loaded)
+      end
+
+      def request_system_notifications do
+        :erlang.nif_error(:nif_not_loaded)
+      end
+
+      def show_system_notification(_tag, _title, _subtitle, _body, _sound) do
+        :erlang.nif_error(:nif_not_loaded)
+      end
+
+      def dismiss_system_notification(_tag) do
+        :erlang.nif_error(:nif_not_loaded)
+      end
+
+      def subscribe_system_notifications do
+        :erlang.nif_error(:nif_not_loaded)
+      end
+
       def start_runtime do
         :erlang.nif_error(:nif_not_loaded)
       end
 
       def stop_runtime(_runtime) do
+        :erlang.nif_error(:nif_not_loaded)
+      end
+
+      def activate_window(_runtime, _window_id) do
         :erlang.nif_error(:nif_not_loaded)
       end
 
@@ -67,6 +91,10 @@ defmodule GPUI.Native.Generated do
       end
 
       def set_theme(_runtime, _mode) do
+        :erlang.nif_error(:nif_not_loaded)
+      end
+
+      def load_font(_runtime, _bytes) do
         :erlang.nif_error(:nif_not_loaded)
       end
 
@@ -107,6 +135,14 @@ defmodule GPUI.Native.Generated do
       end
 
       def native_test_click(_session, _target) do
+        :erlang.nif_error(:nif_not_loaded)
+      end
+
+      def native_test_double_click(_session, _target) do
+        :erlang.nif_error(:nif_not_loaded)
+      end
+
+      def native_test_pinch(_session, _target, _delta, _phase) do
         :erlang.nif_error(:nif_not_loaded)
       end
 

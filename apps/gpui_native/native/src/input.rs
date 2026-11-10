@@ -6,7 +6,10 @@ use crate::gpui::{
     Styled, TextAlign, TextRun, UTF16Selection, UnderlineStyle, Window,
 };
 use crate::{gpui, push_event, EventValue, InputKind, NativeEvent, SharedRuntime};
-use std::{collections::VecDeque, ops::Range};
+use std::{
+    collections::{HashSet, VecDeque},
+    ops::Range,
+};
 use unicode_segmentation::UnicodeSegmentation;
 
 #[cfg(feature = "real-gpui")]
@@ -20,6 +23,8 @@ actions!(
         SelectLeft,
         SelectRight,
         SelectAll,
+        SelectHome,
+        SelectEnd,
         Home,
         End,
         Paste,
@@ -40,6 +45,10 @@ pub(crate) fn bind_input_keys(cx: &mut App) {
         KeyBinding::new("cmd-v", Paste, None),
         KeyBinding::new("cmd-c", Copy, None),
         KeyBinding::new("cmd-x", Cut, None),
+        KeyBinding::new("cmd-left", Home, None),
+        KeyBinding::new("cmd-right", End, None),
+        KeyBinding::new("cmd-shift-left", SelectHome, None),
+        KeyBinding::new("cmd-shift-right", SelectEnd, None),
         KeyBinding::new("home", Home, None),
         KeyBinding::new("end", End, None),
     ]);
@@ -65,6 +74,13 @@ pub(crate) struct NativeTextInput {
     pending_values: VecDeque<String>,
     last_layout: Option<ShapedLine>,
     last_bounds: Option<Bounds<Pixels>>,
+    last_text_origin: Option<gpui::Point<Pixels>>,
+    select_all_request: u64,
+    capture_keys: Vec<String>,
+    capture_keydown: Option<String>,
+    capture_keystroke: Option<String>,
+    capture_pressed: HashSet<String>,
+    _capture_subscription: gpui::Subscription,
 }
 
 impl NativeTextInput {
@@ -78,6 +94,58 @@ impl NativeTextInput {
         cx: &mut Context<Self>,
     ) -> Self {
         set_input_value(&runtime, &id, value.clone());
+        let input = cx.weak_entity();
+        let capture_subscription = cx.intercept_keystrokes(move |event, window, cx| {
+            let mods = event.keystroke.modifiers;
+            if mods.control || mods.alt || mods.platform || mods.function {
+                return;
+            }
+            let capture_key = if mods.shift {
+                if event.keystroke.key != "tab" {
+                    return;
+                }
+                "shift-tab"
+            } else {
+                event.keystroke.key.as_str()
+            };
+            let Some(input) = input.upgrade() else {
+                return;
+            };
+            input.update(cx, |input, cx| {
+                if !input.focus_handle.is_focused(window)
+                    || !input.capture_keys.iter().any(|key| key == capture_key)
+                {
+                    return;
+                }
+                if event.keystroke.key == "escape"
+                    && input.runtime.overlay_owns_escape(input.window_id)
+                {
+                    return;
+                }
+                let repeat = !input.capture_pressed.insert(event.keystroke.key.clone());
+                if let Some(callback) = input.capture_keystroke.as_ref() {
+                    crate::element::event::emit_structured_key(
+                        &input.runtime,
+                        input.window_id,
+                        callback,
+                        &event.keystroke,
+                        repeat,
+                    );
+                }
+                if let Some(callback) = input.capture_keydown.as_ref() {
+                    let _ = push_event(
+                        &input.runtime,
+                        NativeEvent::Input {
+                            kind: InputKind::KeyDown,
+                            window_id: input.window_id,
+                            event: callback.clone(),
+                            value: Some(EventValue::String(event.keystroke.key.clone())),
+                        },
+                    );
+                }
+                cx.stop_propagation();
+            });
+        });
         Self {
             id,
             runtime,
@@ -92,7 +160,34 @@ impl NativeTextInput {
             pending_values: VecDeque::new(),
             last_layout: None,
             last_bounds: None,
+            last_text_origin: None,
+            select_all_request: 0,
+            capture_keys: Vec::new(),
+            capture_keydown: None,
+            capture_keystroke: None,
+            capture_pressed: HashSet::new(),
+            _capture_subscription: capture_subscription,
         }
+    }
+
+    pub(crate) fn request_select_all(&mut self, request: u64) {
+        if request > 0 && request != self.select_all_request {
+            self.selected_range = 0..self.value().len();
+            self.selection_reversed = false;
+            self.marked_range = None;
+        }
+        self.select_all_request = request;
+    }
+
+    pub(crate) fn set_key_capture(
+        &mut self,
+        keys: Vec<String>,
+        keydown: Option<String>,
+        keystroke: Option<String>,
+    ) {
+        self.capture_keys = keys;
+        self.capture_keydown = keydown;
+        self.capture_keystroke = keystroke;
     }
 
     pub(crate) fn native_focus_handle(&self) -> FocusHandle {
@@ -107,9 +202,15 @@ impl NativeTextInput {
     ) {
         let apply_value = self.reconcile_value(&value);
 
-        if apply_value && self.value() != value {
+        let previous = self.value();
+        if apply_value && previous != value {
+            let at_end = self.selected_range.is_empty() && self.cursor_offset() == previous.len();
+            let cursor = if at_end {
+                value.len()
+            } else {
+                Self::clamp(&value, self.cursor_offset())
+            };
             set_input_value(&self.runtime, &self.id, value.clone());
-            let cursor = Self::clamp(&value, self.cursor_offset());
             self.selected_range = cursor..cursor;
             self.selection_reversed = false;
             self.marked_range = None;
@@ -310,7 +411,7 @@ impl NativeTextInput {
         } else if position.y > bounds.bottom() {
             value.len()
         } else {
-            line.closest_index_for_x(position.x - bounds.left())
+            line.closest_index_for_x(position.x - self.last_text_origin.unwrap_or(bounds.origin).x)
         }
     }
 
@@ -350,6 +451,14 @@ impl NativeTextInput {
 
     fn end(&mut self, _: &End, _: &mut Window, cx: &mut Context<Self>) {
         self.move_to(self.value().len(), cx);
+    }
+
+    fn select_home(&mut self, _: &SelectHome, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(0, cx);
+    }
+
+    fn select_end(&mut self, _: &SelectEnd, _: &mut Window, cx: &mut Context<Self>) {
+        self.select_to(self.value().len(), cx);
     }
 
     fn backspace(&mut self, _: &Backspace, window: &mut Window, cx: &mut Context<Self>) {
@@ -501,14 +610,18 @@ impl EntityInputHandler for NativeTextInput {
         &mut self,
         range: Range<usize>,
         bounds: Bounds<Pixels>,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
         let line = self.last_layout.as_ref()?;
         let range = self.range_from_utf16(&range);
+        let origin = self.last_text_origin.unwrap_or(bounds.origin);
         Some(Bounds::from_corners(
-            point(bounds.left() + line.x_for_index(range.start), bounds.top()),
-            point(bounds.left() + line.x_for_index(range.end), bounds.bottom()),
+            point(origin.x + line.x_for_index(range.start), origin.y),
+            point(
+                origin.x + line.x_for_index(range.end),
+                origin.y + window.line_height(),
+            ),
         ))
     }
 
@@ -528,6 +641,7 @@ struct NativeTextInputElement {
 }
 
 struct NativeTextInputPrepaintState {
+    origin: gpui::Point<Pixels>,
     line: Option<ShapedLine>,
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
@@ -583,11 +697,10 @@ impl Element for NativeTextInputElement {
             content.clone()
         };
         let style = window.text_style();
-        let color = if content.is_empty() {
-            gpui::hsla(0., 0., 0., 0.35)
-        } else {
-            style.color
-        };
+        // A primitive input inherits its foreground for both text and placeholder.
+        // Consumers can select a muted foreground while the value is empty; a
+        // hard-coded translucent black makes placeholders disappear in dark UIs.
+        let color = style.color;
         let run = TextRun {
             len: display_text.len(),
             font: style.font(),
@@ -630,14 +743,16 @@ impl Element for NativeTextInputElement {
             &runs,
             None,
         );
+        let origin = text_origin(bounds, line.width, window.line_height(), style.text_align);
+        let text_bounds = Bounds::new(origin, size(bounds.size.width, window.line_height()));
         let cursor_pos = line.x_for_index(input.cursor_offset());
         let (selection, cursor) = if input.selected_range.is_empty() {
             (
                 None,
                 Some(fill(
                     Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top()),
-                        size(px(2.), bounds.bottom() - bounds.top()),
+                        point(text_bounds.left() + cursor_pos, text_bounds.top()),
+                        size(px(2.), text_bounds.bottom() - text_bounds.top()),
                     ),
                     gpui::blue(),
                 )),
@@ -647,12 +762,12 @@ impl Element for NativeTextInputElement {
                 Some(fill(
                     Bounds::from_corners(
                         point(
-                            bounds.left() + line.x_for_index(input.selected_range.start),
-                            bounds.top(),
+                            text_bounds.left() + line.x_for_index(input.selected_range.start),
+                            text_bounds.top(),
                         ),
                         point(
-                            bounds.left() + line.x_for_index(input.selected_range.end),
-                            bounds.bottom(),
+                            text_bounds.left() + line.x_for_index(input.selected_range.end),
+                            text_bounds.bottom(),
                         ),
                     ),
                     rgba(0x3311ff30),
@@ -661,6 +776,7 @@ impl Element for NativeTextInputElement {
             )
         };
         NativeTextInputPrepaintState {
+            origin,
             line: Some(line),
             cursor,
             selection,
@@ -691,7 +807,7 @@ impl Element for NativeTextInputElement {
         };
         if line
             .paint(
-                bounds.origin,
+                prepaint.origin,
                 window.line_height(),
                 TextAlign::Left,
                 None,
@@ -710,13 +826,52 @@ impl Element for NativeTextInputElement {
         self.input.update(cx, |input, _cx| {
             input.last_layout = Some(line);
             input.last_bounds = Some(bounds);
+            input.last_text_origin = Some(prepaint.origin);
         });
     }
+}
+
+fn text_origin(
+    bounds: Bounds<Pixels>,
+    line_width: Pixels,
+    line_height: Pixels,
+    align: TextAlign,
+) -> gpui::Point<Pixels> {
+    let remaining = (bounds.size.width - line_width).max(px(0.0));
+    let x = match align {
+        TextAlign::Center => remaining / 2.0,
+        TextAlign::Right => remaining,
+        _ => px(0.0),
+    };
+    point(
+        bounds.left() + x,
+        bounds.top() + (bounds.size.height - line_height).max(px(0.0)) / 2.0,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::NativeTextInput;
+
+    #[test]
+    fn aligned_text_origin_is_shared_by_paint_caret_hit_testing_and_ime() {
+        use crate::gpui::{point, px, size, Bounds, TextAlign};
+        let bounds = Bounds::new(point(px(10.0), px(20.0)), size(px(80.0), px(32.0)));
+        for (align, x) in [
+            (TextAlign::Left, 10.0),
+            (TextAlign::Center, 40.0),
+            (TextAlign::Right, 70.0),
+        ] {
+            assert_eq!(
+                super::text_origin(bounds, px(20.0), px(20.0), align),
+                point(px(x), px(26.0))
+            );
+        }
+        assert_eq!(
+            super::text_origin(bounds, px(100.0), px(40.0), TextAlign::Center),
+            point(px(10.0), px(20.0))
+        );
+    }
 
     #[test]
     fn marked_selection_clamps_malformed_utf16_ranges_to_inserted_text() {
@@ -738,6 +893,9 @@ impl Render for NativeTextInput {
         div()
             .key_context("GPUIInput")
             .track_focus(&self.focus_handle(cx))
+            .on_key_up(cx.listener(|input, key: &gpui::KeyUpEvent, _window, _cx| {
+                input.capture_pressed.remove(&key.keystroke.key);
+            }))
             .cursor(CursorStyle::IBeam)
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
@@ -746,12 +904,19 @@ impl Render for NativeTextInput {
             .on_action(cx.listener(Self::select_left))
             .on_action(cx.listener(Self::select_right))
             .on_action(cx.listener(Self::select_all))
+            .on_action(cx.listener(Self::select_home))
+            .on_action(cx.listener(Self::select_end))
             .on_action(cx.listener(Self::home))
             .on_action(cx.listener(Self::end))
             .on_action(cx.listener(Self::paste))
             .on_action(cx.listener(Self::copy))
             .on_action(cx.listener(Self::cut))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::mouse_down))
+            .on_mouse_down_out(cx.listener(|input, _event, window, cx| {
+                if input.focus_handle.is_focused(window) {
+                    window.blur(cx);
+                }
+            }))
             .child(NativeTextInputElement { input: cx.entity() })
     }
 }

@@ -1,0 +1,2173 @@
+--- a/src/app.rs
++++ b/src/app.rs
+@@ -1,3 +1,4 @@
++use crate::{KeyDownEvent, Size, point};
+ use scheduler::Instant;
+ use std::{
+     any::{TypeId, type_name},
+@@ -1514,6 +1515,16 @@
+         self.platform.set_app_identity(identifier, name);
+     }
+ 
++    /// Reads notification authorization without prompting.
++    pub fn system_notification_status(&self) -> Task<Result<crate::SystemNotificationStatus>> {
++        self.platform.system_notification_status()
++    }
++
++    /// Explicitly requests notification authorization.
++    pub fn request_system_notifications(&self) -> Task<Result<crate::SystemNotificationStatus>> {
++        self.platform.request_system_notifications()
++    }
++
+     /// Posts a notification to the operating system's notification center.
+     ///
+     /// Posting a notification whose [`SystemNotification::tag`] matches an
+@@ -1522,6 +1533,13 @@
+     /// unavailable (e.g. authorization was denied).
+     pub fn show_system_notification(&self, notification: SystemNotification) {
+         self.platform.show_system_notification(notification);
++    }
++
++    /// Posts with platform presentation options without requesting authorization.
++    pub fn show_system_notification_with_options(
++        &self, notification: SystemNotification, options: crate::SystemNotificationOptions,
++    ) {
++        self.platform.show_system_notification_with_options(notification, options);
+     }
+ 
+     /// Removes the delivered or pending notification with this tag.
+@@ -2984,10 +3002,135 @@
+ pub type ExternalDragPayloadSource =
+     Box<dyn FnOnce(&mut Window, &mut App) -> Option<ExternalDragPayload> + 'static>;
+ 
++/// Preferred side of an element-anchored tooltip.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum TooltipPlacement {
++    /// Above the trigger.
++    Top,
++    /// Above the trigger, aligned to its left edge.
++    TopStart,
++    /// Above the trigger, aligned to its right edge.
++    TopEnd,
++    /// Below the trigger.
++    Bottom,
++    /// Below the trigger, aligned to its left edge.
++    BottomStart,
++    /// Below the trigger, aligned to its right edge.
++    BottomEnd,
++    /// Before the trigger horizontally.
++    Left,
++    /// After the trigger horizontally.
++    Right,
++}
++
++/// Element bounds and spacing used to position a tooltip independently of the pointer.
++#[derive(Clone, Copy, Debug)]
++pub struct TooltipAnchor {
++    /// The trigger bounds in viewport coordinates.
++    pub bounds: Bounds<Pixels>,
++    /// The preferred side.
++    pub placement: TooltipPlacement,
++    /// The distance from the trigger.
++    pub offset: Pixels,
++}
++
++impl TooltipAnchor {
++    /// Position and round the origin to the nearest physical pixel, with positive
++    /// half pixels rounded upward. Keep the measured content size unchanged.
++    pub fn tooltip_bounds_at_scale(
++        self,
++        size: Size<Pixels>,
++        viewport: Size<Pixels>,
++        margin: Pixels,
++        scale_factor: f32,
++    ) -> Bounds<Pixels> {
++        let mut bounds = self.tooltip_bounds(size, viewport, margin);
++        bounds.origin = bounds
++            .origin
++            .map(|value| Pixels((value.0 * scale_factor).round() / scale_factor));
++        bounds
++    }
++
++    /// Prefer the requested side, flip when it cannot fit, then clamp to the viewport.
++    pub fn tooltip_bounds(
++        self,
++        size: Size<Pixels>,
++        viewport: Size<Pixels>,
++        margin: Pixels,
++    ) -> Bounds<Pixels> {
++        let center = self.bounds.center();
++        let top = point(
++            center.x - size.width / 2.,
++            self.bounds.top() - size.height - self.offset,
++        );
++        let bottom = point(
++            center.x - size.width / 2.,
++            self.bounds.bottom() + self.offset,
++        );
++        let left = point(
++            self.bounds.left() - size.width - self.offset,
++            center.y - size.height / 2.,
++        );
++        let right = point(
++            self.bounds.right() + self.offset,
++            center.y - size.height / 2.,
++        );
++        let (preferred, alternate) = match self.placement {
++            TooltipPlacement::Top => (top, bottom),
++            TooltipPlacement::Bottom => (bottom, top),
++            TooltipPlacement::TopStart => (point(self.bounds.left(), top.y), point(self.bounds.left(), bottom.y)),
++            TooltipPlacement::TopEnd => (point(self.bounds.right() - size.width, top.y), point(self.bounds.right() - size.width, bottom.y)),
++            TooltipPlacement::BottomStart => (point(self.bounds.left(), bottom.y), point(self.bounds.left(), top.y)),
++            TooltipPlacement::BottomEnd => (point(self.bounds.right() - size.width, bottom.y), point(self.bounds.right() - size.width, top.y)),
++            TooltipPlacement::Left => (left, right),
++            TooltipPlacement::Right => (right, left),
++        };
++        // Cross-axis overflow is handled by clamping, not by flipping the side.
++        let main_fits = |origin: Point<Pixels>| match self.placement {
++            TooltipPlacement::Top | TooltipPlacement::Bottom |
++            TooltipPlacement::TopStart | TooltipPlacement::TopEnd |
++            TooltipPlacement::BottomStart | TooltipPlacement::BottomEnd => {
++                origin.y >= margin && origin.y + size.height <= viewport.height - margin
++            }
++            TooltipPlacement::Left | TooltipPlacement::Right => {
++                origin.x >= margin && origin.x + size.width <= viewport.width - margin
++            }
++        };
++        let origin = if main_fits(preferred) || !main_fits(alternate) {
++            preferred
++        } else {
++            alternate
++        };
++        Bounds::new(
++            point(
++                origin
++                    .x
++                    .max(margin)
++                    .min((viewport.width - size.width - margin).max(margin)),
++                origin
++                    .y
++                    .max(margin)
++                    .min((viewport.height - size.height - margin).max(margin)),
++            ),
++            size,
++        )
++    }
++}
++
+ /// Contains state associated with a tooltip. You'll only need this struct if you're implementing
+ /// tooltip behavior on a custom element. Otherwise, use [Div::tooltip](crate::Interactivity::tooltip).
+ #[derive(Clone)]
+ pub struct AnyTooltip {
++    /// Delay after leaving a hoverable tooltip and its trigger. None retains 500ms.
++    pub hide_delay: Option<Duration>,
++    /// Optional viewport margin for anchored tooltips. Defaults to four pixels.
++    pub collision_padding: Option<Pixels>,
++    /// Optional element anchoring. None retains cursor placement.
++    pub anchor: Option<TooltipAnchor>,
++    /// Optional content revision used to refresh a visible tooltip.
++    pub revision: Option<u64>,
++    /// Optional keyboard dismissal. Returns true when Escape is consumed.
++    pub dismiss: Option<Rc<dyn Fn(&KeyDownEvent, &mut Window, &mut App) -> bool>>,
+     /// The view used to display the tooltip
+     pub view: AnyView,
+ 
+@@ -3183,3 +3326,57 @@
+         assert_eq!(restart_arguments, arguments);
+     }
+ }
++
++#[cfg(test)]
++mod tooltip_position_tests {
++    use super::*;
++    use crate::{px, size};
++
++    #[test]
++    fn edge_alignment_survives_flipping_and_clamps_at_the_viewport_margin() {
++        let viewport = size(px(400.), px(200.));
++        let content = size(px(180.), px(28.));
++        for (placement, expected_x) in [(TooltipPlacement::TopStart, 100.), (TooltipPlacement::TopEnd, 40.)] {
++            let anchor = TooltipAnchor { bounds: Bounds::new(point(px(100.), px(5.)), size(px(120.), px(22.))), placement, offset: px(6.) };
++            assert_eq!(anchor.tooltip_bounds(content, viewport, px(5.)).origin, point(px(expected_x), px(33.)));
++        }
++        for placement in [TooltipPlacement::TopStart, TooltipPlacement::BottomStart] {
++            let anchor = TooltipAnchor { bounds: Bounds::new(point(px(350.), px(150.)), size(px(40.), px(22.))), placement, offset: px(6.) };
++            assert_eq!(anchor.tooltip_bounds(content, viewport, px(5.)).origin, point(px(215.), px(116.)));
++        }
++    }
++
++    #[test]
++    fn anchored_origin_rounds_after_fitting_without_resizing_content() {
++        let anchor = TooltipAnchor {
++            bounds: Bounds::new(point(px(1320.), px(5.5)), size(px(24.), px(24.))),
++            placement: TooltipPlacement::Top,
++            offset: px(4.),
++        };
++        let tooltip = size(px(144.375), px(28.));
++        let viewport = size(px(1400.), px(900.));
++        let at_one = anchor.tooltip_bounds_at_scale(tooltip, viewport, px(5.), 1.);
++        assert_eq!(at_one.origin, point(px(1251.), px(34.)));
++        assert_eq!(at_one.size, tooltip);
++        let at_two = anchor.tooltip_bounds_at_scale(tooltip, viewport, px(5.), 2.);
++        assert_eq!(at_two.origin, point(px(1250.5), px(33.5)));
++        assert_eq!(at_two.size, tooltip);
++        // A configured margin changes both the collision decision and clamping.
++        let near_top = TooltipAnchor {
++            bounds: Bounds::new(point(px(0.), px(36.)), size(px(24.), px(24.))),
++            ..anchor
++        };
++        assert_eq!(
++            near_top
++                .tooltip_bounds_at_scale(tooltip, viewport, px(4.), 1.)
++                .origin,
++            point(px(4.), px(4.))
++        );
++        assert_eq!(
++            near_top
++                .tooltip_bounds_at_scale(tooltip, viewport, px(5.), 1.)
++                .origin,
++            point(px(5.), px(64.))
++        );
++    }
++}
+--- a/src/assets.rs
++++ b/src/assets.rs
+@@ -86,6 +86,46 @@
+             .unwrap_or_default()
+     }
+ 
++    // Linear filtering must clamp at the image edge, not at the shared atlas
++    // texture edge. Replicate one texel around the upload; the painted tile
++    // excludes this border, preserving image dimensions and UV interpolation.
++    pub(crate) fn atlas_data(&self, frame_index: usize) -> Option<(Size<DevicePixels>, Vec<u8>)> {
++        let frame = self.data.get(frame_index)?.buffer();
++        let width = frame.width() as usize;
++        let height = frame.height() as usize;
++        if width == 0 || height == 0 {
++            return None;
++        }
++        // At the texture limit an image already spans the atlas edge, whose
++        // sampler clamps. Use only the remaining room for its replicated edge.
++        let atlas_width = width + 16_384usize.saturating_sub(width).min(2);
++        let atlas_height = height + 16_384usize.saturating_sub(height).min(2);
++        let left = (atlas_width - width) / 2;
++        let top = (atlas_height - height) / 2;
++        let stride = atlas_width * 4;
++        let mut padded = vec![0; stride * atlas_height];
++        for row in 0..atlas_height {
++            let source_row = row.saturating_sub(top).min(height - 1);
++            let source = &frame.as_raw()[source_row * width * 4..(source_row + 1) * width * 4];
++            let target = &mut padded[row * stride..(row + 1) * stride];
++            let start = left * 4;
++            target[start..start + source.len()].copy_from_slice(source);
++            if left > 0 {
++                target[..4].copy_from_slice(&source[..4]);
++            }
++            if atlas_width > left + width {
++                target[stride - 4..].copy_from_slice(&source[source.len() - 4..]);
++            }
++        }
++        Some((
++            size(
++                DevicePixels(atlas_width as i32),
++                DevicePixels(atlas_height as i32),
++            ),
++            padded,
++        ))
++    }
++
+     /// Get the size of this image, in pixels for display, adjusted for the scale factor.
+     pub(crate) fn render_size(&self, frame_index: usize) -> Size<Pixels> {
+         self.size(frame_index)
+@@ -121,11 +161,63 @@
+     use smallvec::SmallVec;
+ 
+     #[test]
++    fn atlas_data_repeats_a_single_pixel_without_changing_display_size() {
++        let pixel = [49, 120, 198, 255];
++        let image = RenderImage::new(vec![Frame::new(image::RgbaImage::from_pixel(
++            1,
++            1,
++            image::Rgba(pixel),
++        ))]);
++        let (size, bytes) = image.atlas_data(0).unwrap();
++        assert_eq!(size, super::size(DevicePixels(3), DevicePixels(3)));
++        assert_eq!(bytes, pixel.repeat(9));
++        assert_eq!(image.size(0), super::size(DevicePixels(1), DevicePixels(1)));
++        assert_eq!(image.as_bytes(0), Some(pixel.as_slice()));
++        assert!(image.atlas_data(1).is_none());
++    }
++
++    #[test]
++    fn atlas_data_preserves_corners_and_transparency_for_each_frame() {
++        let a = [1, 2, 3, 255];
++        let b = [4, 5, 6, 128];
++        let c = [7, 8, 9, 0];
++        let d = [10, 11, 12, 255];
++        let frame = Frame::new(image::RgbaImage::from_raw(2, 2, [a, b, c, d].concat()).unwrap());
++        let image = RenderImage::new(vec![frame.clone(), frame]);
++        for index in 0..2 {
++            let (size, bytes) = image.atlas_data(index).unwrap();
++            assert_eq!(size, super::size(DevicePixels(4), DevicePixels(4)));
++            assert_eq!(
++                bytes,
++                [a, a, b, b, a, a, b, b, c, c, d, d, c, c, d, d].concat()
++            );
++        }
++    }
++
++    #[test]
++    fn atlas_data_keeps_images_at_the_texture_limit_renderable() {
++        for (width, height) in [(16_383, 1), (16_384, 1), (1, 16_383), (1, 16_384)] {
++            let pixel = image::Rgba([12, 34, 56, 78]);
++            let image = RenderImage::new(vec![Frame::new(image::RgbaImage::from_pixel(
++                width, height, pixel,
++            ))]);
++            let (size, bytes) = image.atlas_data(0).unwrap();
++            assert!(size.width.0 <= 16_384 && size.height.0 <= 16_384);
++            assert_eq!(
++                bytes.len(),
++                size.width.0 as usize * size.height.0 as usize * 4
++            );
++            assert!(bytes.chunks_exact(4).all(|chunk| chunk == pixel.0));
++        }
++    }
++
++    #[test]
+     fn empty_render_image_does_not_panic() {
+         let image = RenderImage::new(SmallVec::new());
+         assert_eq!(image.frame_count(), 0);
+         assert_eq!(image.size(0), Size::default());
+         assert_eq!(image.as_bytes(0), None);
++        assert!(image.atlas_data(0).is_none());
+         assert_eq!(image.render_size(0), Size::default());
+         assert_eq!(image.delay(0), Delay::from_numer_denom_ms(100, 1));
+         let _ = format!("{image:?}");
+--- a/src/elements/animation.rs
++++ b/src/elements/animation.rs
+@@ -400,7 +400,7 @@
+     ) -> (crate::LayoutId, Self::RequestLayoutState) {
+         window.with_element_state(global_id.unwrap(), |state, window| {
+             let mut state = state.unwrap_or_else(|| AnimationState {
+-                start: Instant::now(),
++                start: cx.background_executor().now(),
+                 animation_ix: 0,
+                 delayed_frame_pending: Rc::new(Cell::new(false)),
+             });
+@@ -421,7 +421,7 @@
+                     // Reduce modulo the duration before f32 conversion, which loses sub-second precision at scale.
+                     Duration::from_nanos((elapsed.as_nanos() % duration.as_nanos()) as u64)
+                 } else {
+-                    state.start.elapsed()
++                    cx.background_executor().now() - state.start
+                 };
+                 let mut delta = elapsed.as_secs_f32() / duration.as_secs_f32();
+ 
+@@ -431,7 +431,7 @@
+                         if animation_ix >= self.animations.len() - 1 {
+                             done = true;
+                         } else {
+-                            state.start = Instant::now();
++                            state.start = cx.background_executor().now();
+                             state.animation_ix += 1;
+                         }
+                         delta = 1.0;
+--- a/src/elements/div.rs
++++ b/src/elements/div.rs
+@@ -704,6 +704,31 @@
+         self.tooltip_show_delay = Some(delay);
+     }
+ 
++    /// Set the delay before a hoverable tooltip closes after pointer leave.
++    pub fn tooltip_hide_delay(&mut self, delay: Duration) {
++        self.tooltip_hide_delay = Some(delay);
++    }
++
++    /// Enable tooltips for Tab-originated focus and keyboard dismissal.
++    pub fn tooltip_on_focus(&mut self, focus: &FocusHandle) {
++        self.tooltip_focus_handle = Some(focus.clone());
++    }
++
++    /// Change the revision when the tooltip builder's content changes.
++    pub fn tooltip_revision(&mut self, revision: u64) {
++        self.tooltip_revision = Some(revision);
++    }
++
++    /// Anchor the tooltip to this element instead of the pointer.
++    pub fn tooltip_placement(&mut self, placement: crate::TooltipPlacement, offset: Pixels) {
++        self.tooltip_placement = Some((placement, offset));
++    }
++
++    /// Set the viewport margin used when fitting an anchored tooltip.
++    pub fn tooltip_collision_padding(&mut self, padding: Pixels) {
++        self.tooltip_collision_padding = Some(padding.max(Pixels::ZERO));
++    }
++
+     /// Block the mouse from all interactions with elements behind this element's hitbox. Typically
+     /// `block_mouse_except_scroll` should be preferred.
+     ///
+@@ -1625,6 +1650,48 @@
+         Self: Sized,
+     {
+         self.interactivity().hoverable_tooltip(build_tooltip);
++        self
++    }
++
++    /// Show on Tab-originated focus without adding a Tab stop; Escape dismisses it.
++    fn tooltip_on_focus(mut self, focus: &FocusHandle) -> Self
++    where
++        Self: Sized,
++    {
++        self.interactivity().tooltip_on_focus(focus);
++        self
++    }
++
++    /// Set the hoverable tooltip close delay; zero hides immediately.
++    fn tooltip_hide_delay(mut self, delay: Duration) -> Self where Self: Sized {
++        self.interactivity().tooltip_hide_delay(delay);
++        self
++    }
++
++    /// Refresh an already visible tooltip when this content revision changes.
++    fn tooltip_revision(mut self, revision: u64) -> Self
++    where
++        Self: Sized,
++    {
++        self.interactivity().tooltip_revision(revision);
++        self
++    }
++
++    /// Anchor the tooltip to this element, with viewport flipping and clamping.
++    fn tooltip_placement(mut self, placement: crate::TooltipPlacement, offset: Pixels) -> Self
++    where
++        Self: Sized,
++    {
++        self.interactivity().tooltip_placement(placement, offset);
++        self
++    }
++
++    /// Set the viewport margin used when fitting an anchored tooltip.
++    fn tooltip_collision_padding(mut self, padding: Pixels) -> Self
++    where
++        Self: Sized,
++    {
++        self.interactivity().tooltip_collision_padding(padding);
+         self
+     }
+ 
+@@ -2081,6 +2148,11 @@
+     pub(crate) hover_listener: Option<Box<dyn Fn(&bool, &mut Window, &mut App)>>,
+     pub(crate) tooltip_builder: Option<TooltipBuilder>,
+     pub(crate) tooltip_show_delay: Option<Duration>,
++    pub(crate) tooltip_hide_delay: Option<Duration>,
++    pub(crate) tooltip_placement: Option<(crate::TooltipPlacement, Pixels)>,
++    pub(crate) tooltip_revision: Option<u64>,
++    pub(crate) tooltip_collision_padding: Option<Pixels>,
++    pub(crate) tooltip_focus_handle: Option<FocusHandle>,
+     pub(crate) window_control: Option<WindowControlArea>,
+     pub(crate) hitbox_behavior: HitboxBehavior,
+     pub(crate) tab_index: Option<isize>,
+@@ -2265,11 +2337,160 @@
+                             .hover_state
+                             .get_or_insert_with(Default::default);
+                     }
++                    let keyboard = self.tooltip_focus_handle.is_some();
++                    if keyboard && self.tooltip_builder.is_some() {
++                        element_state
++                            .active_tooltip
++                            .get_or_insert_with(Default::default);
++                    }
++                    let focused = self.tooltip_focus_handle.as_ref().and_then(|focus| {
++                        (window.tab_navigation_focus_visible()
++                            && focus.contains_focused(window, cx))
++                        .then(|| {
++                            window
++                                .focused(cx)
++                                .map(|focus| (focus.id, window.focus_generation))
++                        })
++                        .flatten()
++                    });
++                    let dismissal = keyboard.then(|| {
++                        element_state
++                            .tooltip_dismissal
++                            .get_or_insert_with(Default::default)
++                            .clone()
++                    });
++                    if let Some(dismissal) = &dismissal {
++                        let mut dismissal = dismissal.borrow_mut();
++                        if dismissal.focus != focused {
++                            dismissal.focus = None;
++                        }
++                        if !bounds.contains(&window.mouse_position()) {
++                            dismissal.hover = false;
++                        }
++                    }
+                     if let Some(active_tooltip) = element_state.active_tooltip.as_ref() {
+-                        if self.tooltip_builder.is_some() {
++                        if let Some(builder) = self.tooltip_builder.as_ref() {
++                            let pending_mouse_down = element_state.pending_mouse_down.clone();
++                            let check_dismissal = dismissal.clone();
++                            let check: Rc<dyn Fn(&Window) -> bool> = Rc::new(move |window| {
++                                let dismissed_focus = check_dismissal
++                                    .as_ref()
++                                    .and_then(|state| state.borrow().focus);
++                                let dismissed_hover = check_dismissal
++                                    .as_ref()
++                                    .is_some_and(|state| state.borrow().hover);
++                                focused.is_some_and(|id| Some(id) != dismissed_focus)
++                                    || (!dismissed_hover
++                                        && !window.last_input_was_keyboard()
++                                        && pending_mouse_down
++                                            .as_ref()
++                                            .is_none_or(|pending| pending.borrow().is_none())
++                                        && bounds.contains(&window.mouse_position()))
++                            });
++                            let visibility = tooltip_visibility_checker(
++                                active_tooltip,
++                                builder.hoverable,
++                                check,
++                            );
++                            let anchor = self.tooltip_placement.map(|(placement, offset)| {
++                                crate::TooltipAnchor {
++                                    bounds,
++                                    placement,
++                                    offset,
++                                }
++                            });
++                            let dismiss = dismissal.map(|dismissal| {
++                                let weak = Rc::downgrade(active_tooltip);
++                                Rc::new(
++                                    move |key: &KeyDownEvent, window: &mut Window, cx: &mut App| {
++                                        let escape = key.keystroke.key == "escape";
++                                        if !escape
++                                            && (focused.is_none()
++                                                || focused
++                                                    != window.focused(cx).map(|focus| {
++                                                        (focus.id, window.focus_generation)
++                                                    }))
++                                        {
++                                            return false;
++                                        }
++                                        let Some(active) = weak.upgrade() else {
++                                            return false;
++                                        };
++                                        if !matches!(
++                                            active.borrow().as_ref(),
++                                            Some(
++                                                ActiveTooltip::Visible { .. }
++                                                    | ActiveTooltip::WaitingForHide { .. }
++                                            )
++                                        ) {
++                                            return false;
++                                        }
++                                        let mut state = dismissal.borrow_mut();
++                                        state.focus = window
++                                            .focused(cx)
++                                            .map(|focus| (focus.id, window.focus_generation));
++                                        state.hover = bounds.contains(&window.mouse_position());
++                                        active.borrow_mut().take();
++                                        window.refresh();
++                                        escape
++                                    },
++                                )
++                                    as Rc<dyn Fn(&KeyDownEvent, &mut Window, &mut App) -> bool>
++                            });
++                            let focus_open = focused.is_some_and(|id| {
++                                element_state
++                                    .tooltip_dismissal
++                                    .as_ref()
++                                    .is_none_or(|state| state.borrow().focus != Some(id))
++                            });
++                            if focus_open
++                                && !matches!(
++                                    active_tooltip.borrow().as_ref(),
++                                    Some(ActiveTooltip::Visible { .. })
++                                )
++                            {
++                                *active_tooltip.borrow_mut() = Some(ActiveTooltip::Visible {
++                                    tooltip: AnyTooltip {
++                                        anchor,
++                                        revision: self.tooltip_revision,
++                                        collision_padding: self.tooltip_collision_padding,
++                                        hide_delay: self.tooltip_hide_delay,
++                                        dismiss: dismiss.clone(),
++                                        view: (builder.build)(window, cx),
++                                        mouse_position: window.mouse_position(),
++                                        check_visible_and_update: visibility.clone(),
++                                    },
++                                    is_hoverable: builder.hoverable,
++                                });
++                            }
++                            if let Some(active) = active_tooltip.borrow_mut().as_mut() {
++                                let tooltip = match active {
++                                    ActiveTooltip::Visible {
++                                        tooltip,
++                                        is_hoverable,
++                                    } => {
++                                        *is_hoverable = builder.hoverable;
++                                        Some(tooltip)
++                                    }
++                                    ActiveTooltip::WaitingForHide { tooltip, .. } => Some(tooltip),
++                                    ActiveTooltip::WaitingForShow { .. } => None,
++                                };
++                                if let Some(tooltip) = tooltip {
++                                    if self.tooltip_revision.is_some()
++                                        && tooltip.revision != self.tooltip_revision
++                                    {
++                                        tooltip.view = (builder.build)(window, cx);
++                                        tooltip.revision = self.tooltip_revision;
++                                    }
++                                    tooltip.collision_padding = self.tooltip_collision_padding;
++                                    tooltip.hide_delay = self.tooltip_hide_delay;
++                                    tooltip.anchor = anchor;
++                                    tooltip.dismiss = dismiss;
++                                    tooltip.check_visible_and_update = visibility;
++                                }
++                            }
+                             self.tooltip_id = set_tooltip_on_window(active_tooltip, window);
+                         } else {
+-                            // If there is no longer a tooltip builder, remove the active tooltip.
+                             element_state.active_tooltip.take();
+                         }
+                     }
+@@ -3071,8 +3292,25 @@
+                     .clone();
+ 
+                 let tooltip_is_hoverable = tooltip_builder.hoverable;
++                let tooltip_anchor =
++                    self.tooltip_placement
++                        .map(|(placement, offset)| crate::TooltipAnchor {
++                            bounds: hitbox.bounds,
++                            placement,
++                            offset,
++                        });
++                let tooltip_revision = self.tooltip_revision;
++                let collision_padding = self.tooltip_collision_padding;
++                let hide_delay = self.tooltip_hide_delay;
+                 let build_tooltip = Rc::new(move |window: &mut Window, cx: &mut App| {
+-                    Some(((tooltip_builder.build)(window, cx), tooltip_is_hoverable))
++                    Some((
++                        (tooltip_builder.build)(window, cx),
++                        tooltip_is_hoverable,
++                        tooltip_anchor,
++                        tooltip_revision,
++                        collision_padding,
++                        hide_delay,
++                    ))
+                 });
+                 // Use bounds instead of testing hitbox since this is called during prepaint.
+                 let check_is_hovered_during_prepaint = Rc::new({
+@@ -3086,8 +3324,17 @@
+                 });
+                 let check_is_hovered = Rc::new({
+                     let hitbox = hitbox.clone();
++                    let dismissal = element_state.tooltip_dismissal.clone();
+                     move |window: &Window| {
+-                        pending_mouse_down.borrow().is_none() && hitbox.is_hovered(window)
++                        let hovered = hitbox.is_hovered(window);
++                        if !hovered {
++                            if let Some(state) = &dismissal {
++                                state.borrow_mut().hover = false;
++                            }
++                        }
++                        pending_mouse_down.borrow().is_none()
++                            && hovered
++                            && dismissal.as_ref().is_none_or(|state| !state.borrow().hover)
+                     }
+                 });
+                 register_tooltip_mouse_handlers(
+@@ -3492,6 +3739,7 @@
+     pub(crate) scroll_offset: Option<Rc<RefCell<Point<Pixels>>>>,
+     ongoing_scroll: Option<Rc<RefCell<OngoingScroll>>>,
+     pub(crate) active_tooltip: Option<Rc<RefCell<Option<ActiveTooltip>>>>,
++    pub(crate) tooltip_dismissal: Option<Rc<RefCell<TooltipDismissal>>>,
+ }
+ 
+ /// Whether or not the element or a group that contains it is clicked by the mouse.
+@@ -3518,6 +3766,12 @@
+ 
+     /// True if this element is hovered, false otherwise
+     pub element: bool,
++}
++
++#[derive(Default)]
++pub(crate) struct TooltipDismissal {
++    focus: Option<(crate::FocusId, u64)>,
++    hover: bool,
+ }
+ 
+ pub(crate) enum ActiveTooltip {
+@@ -3577,10 +3831,36 @@
+     Some(window.set_tooltip(tooltip))
+ }
+ 
++fn tooltip_visibility_checker(
++    active: &Rc<RefCell<Option<ActiveTooltip>>>,
++    hoverable: bool,
++    check: Rc<dyn Fn(&Window) -> bool>,
++) -> Rc<dyn Fn(Bounds<Pixels>, &mut Window, &mut App) -> bool> {
++    let weak = Rc::downgrade(active);
++    Rc::new(move |bounds, window, cx| {
++        let Some(active) = weak.upgrade() else {
++            return false;
++        };
++        handle_tooltip_check_visible_and_update(&active, hoverable, &check, bounds, window, cx)
++    })
++}
++
+ pub(crate) fn register_tooltip_mouse_handlers(
+     active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
+     tooltip_id: Option<TooltipId>,
+-    build_tooltip: Rc<dyn Fn(&mut Window, &mut App) -> Option<(AnyView, bool)>>,
++    build_tooltip: Rc<
++        dyn Fn(
++            &mut Window,
++            &mut App,
++        ) -> Option<(
++            AnyView,
++            bool,
++            Option<crate::TooltipAnchor>,
++            Option<u64>,
++            Option<Pixels>,
++            Option<Duration>,
++        )>,
++    >,
+     check_is_hovered: Rc<dyn Fn(&Window) -> bool>,
+     check_is_hovered_during_prepaint: Rc<dyn Fn(&Window) -> bool>,
+     show_delay: Option<Duration>,
+@@ -3641,7 +3921,19 @@
+ /// gets occluded after display, it will stick around until the mouse exits the hover bounds.
+ fn handle_tooltip_mouse_move(
+     active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
+-    build_tooltip: &Rc<dyn Fn(&mut Window, &mut App) -> Option<(AnyView, bool)>>,
++    build_tooltip: &Rc<
++        dyn Fn(
++            &mut Window,
++            &mut App,
++        ) -> Option<(
++            AnyView,
++            bool,
++            Option<crate::TooltipAnchor>,
++            Option<u64>,
++            Option<Pixels>,
++            Option<Duration>,
++        )>,
++    >,
+     check_is_hovered: &Rc<dyn Fn(&Window) -> bool>,
+     check_is_hovered_during_prepaint: &Rc<dyn Fn(&Window) -> bool>,
+     tooltip_id: Option<TooltipId>,
+@@ -3717,34 +4009,27 @@
+                         return;
+                     };
+                     cx.update(|window, cx| {
+-                        let new_tooltip =
+-                            build_tooltip(window, cx).map(|(view, tooltip_is_hoverable)| {
+-                                let weak_active_tooltip = Rc::downgrade(&active_tooltip);
++                        let new_tooltip = build_tooltip(window, cx).map(
++                            |(view, tooltip_is_hoverable, anchor, revision, collision_padding, hide_delay)| {
+                                 ActiveTooltip::Visible {
+                                     tooltip: AnyTooltip {
++                                        anchor,
++                                        revision,
++                                        collision_padding,
++                                        hide_delay,
++                                        dismiss: None,
+                                         view,
+                                         mouse_position: window.mouse_position(),
+-                                        check_visible_and_update: Rc::new(
+-                                            move |tooltip_bounds, window, cx| {
+-                                                let Some(active_tooltip) =
+-                                                    weak_active_tooltip.upgrade()
+-                                                else {
+-                                                    return false;
+-                                                };
+-                                                handle_tooltip_check_visible_and_update(
+-                                                    &active_tooltip,
+-                                                    tooltip_is_hoverable,
+-                                                    &check_is_hovered_during_prepaint,
+-                                                    tooltip_bounds,
+-                                                    window,
+-                                                    cx,
+-                                                )
+-                                            },
++                                        check_visible_and_update: tooltip_visibility_checker(
++                                            &active_tooltip,
++                                            tooltip_is_hoverable,
++                                            check_is_hovered_during_prepaint.clone(),
+                                         ),
+                                     },
+                                     is_hoverable: tooltip_is_hoverable,
+                                 }
+-                            });
++                            },
++                        );
+                         *active_tooltip.borrow_mut() = new_tooltip;
+                         window.refresh();
+                     })
+@@ -3764,6 +4049,17 @@
+ /// Returns a callback which will be called by window prepaint to update tooltip visibility. The
+ /// purpose of doing this logic here instead of the mouse move handler is that the mouse move
+ /// handler won't get called when the element is not painted (e.g. via use of `visible_on_hover`).
++fn tooltip_hover_bridge_contains(anchor: Option<crate::TooltipAnchor>, popup: Bounds<Pixels>, pointer: Point<Pixels>) -> bool {
++    let Some(anchor) = anchor else { return false; };
++    let trigger = anchor.bounds;
++    let overlap_x = pointer.x >= trigger.left().max(popup.left()) && pointer.x <= trigger.right().min(popup.right());
++    let overlap_y = pointer.y >= trigger.top().max(popup.top()) && pointer.y <= trigger.bottom().min(popup.bottom());
++    (overlap_x && popup.bottom() <= trigger.top() && pointer.y >= popup.bottom() && pointer.y <= trigger.top()) ||
++    (overlap_x && trigger.bottom() <= popup.top() && pointer.y >= trigger.bottom() && pointer.y <= popup.top()) ||
++    (overlap_y && popup.right() <= trigger.left() && pointer.x >= popup.right() && pointer.x <= trigger.left()) ||
++    (overlap_y && trigger.right() <= popup.left() && pointer.x >= trigger.right() && pointer.x <= popup.left())
++}
++
+ fn handle_tooltip_check_visible_and_update(
+     active_tooltip: &Rc<RefCell<Option<ActiveTooltip>>>,
+     tooltip_is_hoverable: bool,
+@@ -3781,14 +4077,21 @@
+         CancelHide(AnyTooltip),
+     }
+ 
+-    let is_hovered = check_is_hovered(window)
++    let over_bridge = tooltip_is_hoverable && active_tooltip.borrow().as_ref().is_some_and(|active| {
++        let tooltip = match active {
++            ActiveTooltip::Visible { tooltip, .. } | ActiveTooltip::WaitingForHide { tooltip, .. } => tooltip,
++            ActiveTooltip::WaitingForShow { .. } => return false,
++        };
++        tooltip_hover_bridge_contains(tooltip.anchor, tooltip_bounds, window.mouse_position())
++    });
++    let is_hovered = check_is_hovered(window) || over_bridge
+         || (tooltip_is_hoverable && tooltip_bounds.contains(&window.mouse_position()));
+     let action = match active_tooltip.borrow().as_ref() {
+         Some(ActiveTooltip::Visible { tooltip, .. }) => {
+             if is_hovered {
+                 Action::None
+             } else {
+-                if tooltip_is_hoverable {
++                if tooltip_is_hoverable && tooltip.hide_delay.unwrap_or(HOVERABLE_TOOLTIP_HIDE_DELAY) != Duration::ZERO {
+                     Action::ScheduleHide(tooltip.clone())
+                 } else {
+                     Action::Hide
+@@ -3809,11 +4112,12 @@
+         Action::None => {}
+         Action::Hide => clear_active_tooltip(active_tooltip, window),
+         Action::ScheduleHide(tooltip) => {
++            let delay = tooltip.hide_delay.unwrap_or(HOVERABLE_TOOLTIP_HIDE_DELAY);
+             let delayed_hide_task = window.spawn(cx, {
+                 let weak_active_tooltip = Rc::downgrade(active_tooltip);
+                 async move |cx| {
+                     cx.background_executor()
+-                        .timer(HOVERABLE_TOOLTIP_HIDE_DELAY)
++                        .timer(delay)
+                         .await;
+                     let Some(active_tooltip) = weak_active_tooltip.upgrade() else {
+                         return;
+@@ -4554,6 +4858,12 @@
+     struct TooltipOwner {
+         captured_active_tooltip: CapturedActiveTooltip,
+         show_delay_override: Option<Duration>,
++        revision: Option<u64>,
++        anchored: bool,
++        collision_padding: Option<Pixels>,
++        left: Pixels,
++        focus_scope: Option<FocusHandle>,
++        button_focus: Option<FocusHandle>,
+     }
+ 
+     impl Render for TooltipOwner {
+@@ -4566,7 +4876,29 @@
+                             .id("target")
+                             .w(px(50.))
+                             .h(px(50.))
++                            .ml(self.left)
+                             .tooltip(|_, cx| cx.new(|_| TestTooltipView).into())
++                            .when_some(self.focus_scope.clone(), |this, scope| {
++                                this.track_focus(&scope.clone().tab_stop(false))
++                                    .tooltip_on_focus(&scope)
++                            })
++                            .child(
++                                div()
++                                    .id("focus-child")
++                                    .size_full()
++                                    .when_some(self.button_focus.clone(), |this, focus| {
++                                        this.track_focus(&focus)
++                                    }),
++                            )
++                            .when_some(self.collision_padding, |this, padding| {
++                                this.tooltip_collision_padding(padding)
++                            })
++                            .when_some(self.revision, |this, revision| {
++                                this.tooltip_revision(revision)
++                            })
++                            .when(self.anchored, |this| {
++                                this.tooltip_placement(crate::TooltipPlacement::Top, px(4.))
++                            })
+                             .when_some(self.show_delay_override, |this, delay| {
+                                 this.tooltip_show_delay(delay)
+                             }),
+@@ -4629,6 +4961,12 @@
+             move |_, _| TooltipOwner {
+                 captured_active_tooltip,
+                 show_delay_override,
++                revision: None,
++                anchored: false,
++                collision_padding: Some(px(5.)),
++                left: px(0.),
++                focus_scope: None,
++                button_focus: None,
+             }
+         });
+         let any_window = window.into();
+@@ -4660,6 +4998,151 @@
+             .unwrap();
+ 
+         (test_app, any_window, captured_active_tooltip)
++    }
++
++    #[test]
++    fn tooltip_tab_focus_escape_and_focus_reentry_preserve_the_control_focus() {
++        let (mut app, window, captured) = setup_tooltip_owner_test(Some(Duration::ZERO));
++        app.run_until_parked();
++        let active = captured.borrow().as_ref().unwrap().upgrade().unwrap();
++        let button = app
++            .update_window(window, |root, window, cx| {
++                window.dispatch_event(
++                    MouseMoveEvent {
++                        position: point(px(200.), px(100.)),
++                        modifiers: Default::default(),
++                        pressed_button: None,
++                    }
++                    .to_platform_input(),
++                    cx,
++                );
++                let scope = cx.focus_handle();
++                let button = cx.focus_handle();
++                root.downcast::<TooltipOwner>()
++                    .unwrap()
++                    .update(cx, |owner, cx| {
++                        owner.focus_scope = Some(scope);
++                        owner.button_focus = Some(button.clone());
++                        owner.anchored = true;
++                        cx.notify();
++                    });
++                window.draw(cx).clear(cx);
++                button.focus(window, cx);
++                window.draw(cx).clear(cx);
++                button
++            })
++            .unwrap();
++        assert!(
++            active.borrow().is_none(),
++            "programmatic focus opened the tooltip"
++        );
++        app.update_window(window, |_, window, cx| {
++            window.blur(cx);
++            window.draw(cx).clear(cx);
++        })
++        .unwrap();
++        key_down(&mut app, window, "tab");
++        focus_and_draw(&mut app, window, &button);
++        assert!(
++            matches!(
++                active.borrow().as_ref(),
++                Some(ActiveTooltip::Visible { .. })
++            ),
++            "Tab focus did not open immediately"
++        );
++        let result = app
++            .update_window(window, |_, window, cx| {
++                window.dispatch_event(
++                    KeyDownEvent {
++                        keystroke: Keystroke::parse("escape").unwrap(),
++                        is_held: false,
++                        prefer_character_input: false,
++                    }
++                    .to_platform_input(),
++                    cx,
++                )
++            })
++            .unwrap();
++        assert!(!result.propagate && result.default_prevented);
++        app.update_window(window, |_, window, cx| {
++            assert!(button.is_focused(window));
++            window.draw(cx).clear(cx);
++        })
++        .unwrap();
++        assert!(
++            active.borrow().is_none(),
++            "Escape reopened while focus stayed put"
++        );
++        // A blur/refocus before the next frame is still a new focus session.
++        app.update_window(window, |_, window, cx| {
++            window.blur(cx);
++            button.focus(window, cx);
++            window.draw(cx).clear(cx);
++        })
++        .unwrap();
++        assert!(matches!(
++            active.borrow().as_ref(),
++            Some(ActiveTooltip::Visible { .. })
++        ));
++    }
++
++    #[test]
++    fn tooltip_reconciles_visible_content_and_anchor_without_mouse_movement() {
++        let (mut app, window, captured) = setup_tooltip_owner_test(Some(Duration::ZERO));
++        app.run_until_parked();
++        let active = captured.borrow().as_ref().unwrap().upgrade().unwrap();
++        let original_view = match active.borrow().as_ref().unwrap() {
++            ActiveTooltip::Visible { tooltip, .. } => {
++                assert_eq!(tooltip.collision_padding, Some(px(5.)));
++                tooltip.view.entity_id()
++            }
++            _ => panic!("tooltip did not open"),
++        };
++        app.update_window(window, |root, window, cx| {
++            root.downcast::<TooltipOwner>()
++                .unwrap()
++                .update(cx, |owner, cx| {
++                    owner.revision = Some(1);
++                    owner.collision_padding = Some(px(8.));
++                    owner.anchored = true;
++                    owner.left = px(5.);
++                    cx.notify();
++                });
++            window.draw(cx).clear(cx);
++        })
++        .unwrap();
++        let updated_view = match active.borrow().as_ref().unwrap() {
++            ActiveTooltip::Visible { tooltip, .. } => {
++                assert_eq!(tooltip.revision, Some(1));
++                assert_eq!(tooltip.collision_padding, Some(px(8.)));
++                assert_eq!(tooltip.anchor.unwrap().bounds.left(), px(5.));
++                tooltip.view.entity_id()
++            }
++            _ => panic!("tooltip unexpectedly disappeared"),
++        };
++        assert_ne!(original_view, updated_view);
++        app.update_window(window, |_, window, cx| window.draw(cx).clear(cx))
++            .unwrap();
++        match active.borrow().as_ref().unwrap() {
++            ActiveTooltip::Visible { tooltip, .. } => {
++                assert_eq!(tooltip.view.entity_id(), updated_view)
++            }
++            _ => panic!("tooltip unexpectedly disappeared"),
++        }
++        app.update_window(window, |root, window, cx| {
++            root.downcast::<TooltipOwner>()
++                .unwrap()
++                .update(cx, |owner, cx| {
++                    owner.left = px(15.);
++                    cx.notify();
++                });
++            window.draw(cx).clear(cx);
++        })
++        .unwrap();
++        assert!(
++            active.borrow().is_none(),
++            "tooltip retained stale hover bounds after moving away"
++        );
+     }
+ 
+     #[test]
+@@ -5202,3 +5685,17 @@
+         assert_eq!(bounds("cell-2").origin.x, px(300.));
+     }
+ }
++
++#[cfg(test)]
++mod tooltip_bridge_tests {
++    use super::*;
++    #[test]
++    fn anchored_hover_bridge_covers_only_the_gap_between_overlapping_edges() {
++        let anchor = crate::TooltipAnchor { bounds: Bounds::new(point(px(100.), px(100.)), size(px(120.), px(22.))), placement: crate::TooltipPlacement::TopStart, offset: px(6.) };
++        let popup = Bounds::new(point(px(100.), px(66.)), size(px(200.), px(28.)));
++        assert!(tooltip_hover_bridge_contains(Some(anchor), popup, point(px(150.), px(97.))));
++        assert!(!tooltip_hover_bridge_contains(Some(anchor), popup, point(px(250.), px(97.))));
++        assert!(!tooltip_hover_bridge_contains(Some(anchor), popup, point(px(150.), px(50.))));
++        assert!(!tooltip_hover_bridge_contains(None, popup, point(px(150.), px(97.))));
++    }
++}
+--- a/src/elements/svg.rs
++++ b/src/elements/svg.rs
+@@ -146,22 +146,21 @@
+                     })
+                     .unwrap_or_default();
+ 
++                // Resolve inherited foreground while painting, after ancestor hover
++                // and text-style refinements have been applied.
++                let color = style.text.color.unwrap_or(window.text_style().color);
+                 if let Some((data, path)) = self.data.as_ref().zip(self.data_path.as_ref()) {
+-                    if let Some(color) = style.text.color {
+-                        window
+-                            .paint_svg(
+-                                bounds,
+-                                path.clone(),
+-                                Some(&**data),
+-                                transformation,
+-                                color,
+-                                cx,
+-                            )
+-                            .log_err();
+-                    }
+-                } else if let Some((path, color)) =
+-                    self.external_path.as_ref().zip(style.text.color)
+-                {
++                    window
++                        .paint_svg(
++                            bounds,
++                            path.clone(),
++                            Some(&**data),
++                            transformation,
++                            color,
++                            cx,
++                        )
++                        .log_err();
++                } else if let Some(path) = self.external_path.as_ref() {
+                     let Some(bytes) = window
+                         .use_asset::<SvgAsset>(path, cx)
+                         .and_then(|asset| asset.log_err())
+@@ -179,7 +178,7 @@
+                             cx,
+                         )
+                         .log_err();
+-                } else if let Some((path, color)) = self.path.as_ref().zip(style.text.color) {
++                } else if let Some(path) = self.path.as_ref() {
+                     window
+                         .paint_svg(bounds, path.clone(), None, transformation, color, cx)
+                         .log_err();
+--- a/src/elements/text.rs
++++ b/src/elements/text.rs
+@@ -394,6 +394,7 @@
+     delayed_highlights: Option<Vec<(Range<usize>, HighlightStyle)>>,
+     delayed_font_family_overrides: Option<Vec<(Range<usize>, SharedString)>>,
+     layout: TextLayout,
++    precise_line_height: bool,
+ }
+ 
+ impl StyledText {
+@@ -405,7 +406,15 @@
+             delayed_highlights: None,
+             delayed_font_family_overrides: None,
+             layout: TextLayout::default(),
+-        }
++            precise_line_height: false,
++        }
++    }
++
++    /// Retains fractional line-height advances before layout pixel snapping.
++    /// Shaping, wrapping, truncation, and painting use the ordinary text path.
++    pub fn with_fractional_line_height(mut self) -> Self {
++        self.precise_line_height = true;
++        self
+     }
+ 
+     /// Get the layout for this element. This can be used to map indices to pixels and vice versa.
+@@ -571,7 +580,13 @@
+             Self::apply_font_family_overrides(runs, overrides);
+         }
+ 
+-        let layout_id = self.layout.layout(self.text.clone(), runs, window, cx);
++        let layout_id = self.layout.layout_with_precision(
++            self.text.clone(),
++            runs,
++            self.precise_line_height,
++            window,
++            cx,
++        );
+         (layout_id, ())
+     }
+ 
+@@ -629,25 +644,42 @@
+         text: SharedString,
+         runs: Option<Vec<TextRun>>,
+         window: &mut Window,
++        cx: &mut App,
++    ) -> LayoutId {
++        self.layout_with_precision(text, runs, false, window, cx)
++    }
++
++    fn layout_with_precision(
++        &self,
++        text: SharedString,
++        runs: Option<Vec<TextRun>>,
++        precise: bool,
++        window: &mut Window,
+         _: &mut App,
+     ) -> LayoutId {
+         let text_style = window.text_style();
+         let font_size = text_style.font_size.to_pixels(window.rem_size());
+-        let line_height = window.pixel_snap(
+-            text_style
+-                .line_height
+-                .to_pixels(font_size.into(), window.rem_size()),
+-        );
++        let line_height = text_style
++            .line_height
++            .to_pixels(font_size.into(), window.rem_size());
++        let line_height = if precise {
++            line_height
++        } else {
++            window.pixel_snap(line_height)
++        };
+ 
+         let runs = if let Some(runs) = runs {
+             runs
+         } else {
+             vec![text_style.to_run(text.len())]
+         };
+-        window.request_measured_layout(Default::default(), {
++        let measure = {
+             let element_state = self.clone();
+ 
+-            move |known_dimensions, available_space, window, cx| {
++            move |known_dimensions: Size<Option<Pixels>>,
++                  available_space: Size<crate::AvailableSpace>,
++                  window: &mut Window,
++                  cx: &mut App| {
+                 let wrap_width = if text_style.white_space == WhiteSpace::Normal {
+                     known_dimensions.width.or(match available_space.width {
+                         crate::AvailableSpace::Definite(x) => Some(x),
+@@ -777,7 +809,12 @@
+ 
+                 size
+             }
+-        })
++        };
++        if precise {
++            window.request_precise_measured_layout(Default::default(), measure)
++        } else {
++            window.request_measured_layout(Default::default(), measure)
++        }
+     }
+ 
+     fn prepaint(&self, bounds: Bounds<Pixels>, text: &str) {
+@@ -1218,7 +1255,7 @@
+                                 .index_for_position(window.mouse_position())
+                                 .ok()
+                                 .and_then(|position| tooltip_builder(position, window, cx))
+-                                .map(|view| (view, tooltip_is_hoverable))
++                                .map(|view| (view, tooltip_is_hoverable, None, None, None, None))
+                         }
+                     });
+ 
+--- a/src/platform.rs
++++ b/src/platform.rs
+@@ -260,6 +260,16 @@
+         _ = (identifier, name);
+     }
+ 
++    /// Reads authorization without requesting permission or delivering anything.
++    fn system_notification_status(&self) -> Task<Result<SystemNotificationStatus>> {
++        Task::ready(Ok(SystemNotificationStatus::Unsupported))
++    }
++
++    /// Explicitly requests authorization and returns the resulting status.
++    fn request_system_notifications(&self) -> Task<Result<SystemNotificationStatus>> {
++        Task::ready(Ok(SystemNotificationStatus::Unsupported))
++    }
++
+     /// Posts a notification to the operating system's notification center.
+     ///
+     /// Posting a notification whose [`SystemNotification::tag`] matches an
+@@ -268,6 +278,17 @@
+     /// unavailable (e.g. authorization was denied).
+     fn show_system_notification(&self, notification: SystemNotification) {
+         _ = notification;
++    }
++
++    /// Posts with additional platform presentation options without asking for permission.
++    /// Platforms without subtitle support include it in the body instead.
++    fn show_system_notification_with_options(
++        &self, mut notification: SystemNotification, options: SystemNotificationOptions,
++    ) {
++        if !options.subtitle.is_empty() {
++            notification.body = format!("{}\n{}", options.subtitle, notification.body).into();
++        }
++        self.show_system_notification(notification);
+     }
+ 
+     /// Removes the delivered or pending notification with this tag.
+@@ -349,6 +370,9 @@
+     /// across system restarts.
+     fn uuid(&self) -> Result<Uuid>;
+ 
++    /// Logical-to-device pixel scale for initial placement.
++    fn scale_factor(&self) -> f32 { 1.0 }
++
+     /// Get the bounds for this display
+     fn bounds(&self) -> Bounds<Pixels>;
+ 
+@@ -369,6 +393,19 @@
+         let origin = point(center.x - offset.width, center.y - offset.height);
+         Bounds::new(origin, clipped_window_size)
+     }
++}
++
++/// Operating-system authorization for this application's notifications.
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++pub enum SystemNotificationStatus {
++    /// The user has allowed notifications.
++    Authorized,
++    /// The user has refused notifications.
++    Denied,
++    /// The user has not yet been asked.
++    NotDetermined,
++    /// This platform or launch mode cannot use the notification center.
++    Unsupported,
+ }
+ 
+ /// A notification posted to the operating system's notification center,
+@@ -386,6 +423,15 @@
+     /// Buttons offered on the notification. Platforms that cannot display
+     /// action buttons show the notification without them.
+     pub actions: Vec<SystemNotificationAction>,
++}
++
++/// Additional presentation options for a system notification.
++#[derive(Clone, Debug, Default, PartialEq, Eq)]
++pub struct SystemNotificationOptions {
++    /// Context displayed between the headline and body, where supported.
++    pub subtitle: SharedString,
++    /// Requests the platform's default notification sound.
++    pub sound: bool,
+ }
+ 
+ /// A button offered on a [`SystemNotification`].
+@@ -1583,6 +1629,10 @@
+         }
+     }
+ 
++    pub(crate) fn is_composing(&mut self, window: &mut Window, cx: &mut App) -> bool {
++        self.handler.marked_text_range(window, cx).is_some()
++    }
++
+     pub fn selected_bounds(&mut self, window: &mut Window, cx: &mut App) -> Option<Bounds<Pixels>> {
+         let marked_range = self.handler.marked_text_range(window, cx);
+         let selection = self.handler.selected_text_range(true, window, cx)?;
+--- a/src/style.rs
++++ b/src/style.rs
+@@ -174,12 +174,29 @@
+     pub min_size: GridTemplateMinSize,
+ }
+ 
++/// Tie-breaking when paint bounds land halfway between device pixels.
++#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
++pub enum PaintBoundsRounding {
++    /// Retain GPUI's default half-toward-zero paint snapping.
++    HalfTowardZero,
++    /// Round half pixels toward positive infinity, including negative coordinates.
++    HalfUp,
++}
++
+ /// The CSS styling that can be applied to an element via the `Styled` trait
+ #[derive(Clone, Refineable, Debug)]
+ #[refineable(Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+ pub struct Style {
+     /// What layout strategy should be used?
+     pub display: Display,
++
++    /// Preserve fractional computed border-box bounds for this subtree.
++    /// Authored metrics and measured leaf sizes retain their existing snapping policy.
++    pub preserve_layout_bounds: bool,
++
++    /// Optional inherited rounding policy for painted rectangle edges.
++    /// Layout geometry, stroke widths and glyph rasterization are unaffected.
++    pub paint_rounding: Option<PaintBoundsRounding>,
+ 
+     /// Should the element be painted on screen?
+     pub visibility: Visibility,
+@@ -290,6 +307,11 @@
+ 
+     /// Box shadow of the element
+     pub box_shadow: Vec<BoxShadow>,
++
++    /// An outside ring painted after shadows without affecting layout or hit testing.
++    pub outer_ring_width: Pixels,
++    /// The color of the optional outside ring.
++    pub outer_ring_color: Hsla,
+ 
+     /// The text style of this element
+     #[refineable]
+@@ -692,73 +714,87 @@
+         cx: &mut App,
+         continuation: impl FnOnce(&mut Window, &mut App),
+     ) {
+-        #[cfg(debug_assertions)]
+-        if self.debug_below {
+-            cx.set_global(DebugBelow)
+-        }
+-
+-        #[cfg(debug_assertions)]
+-        if self.debug || cx.has_global::<DebugBelow>() {
+-            window.paint_quad(crate::outline(bounds, crate::red(), BorderStyle::default()));
+-        }
+-
+-        let rem_size = window.rem_size();
+-        let corner_radii = self
+-            .corner_radii
+-            .to_pixels(rem_size)
+-            .clamp_radii_for_quad_size(bounds.size);
+-
+-        window.paint_drop_shadows(bounds, corner_radii, &self.box_shadow);
+-
+-        let background_color = self.background.as_ref().and_then(Fill::color);
+-        if background_color.is_some_and(|color| !color.is_transparent()) {
+-            let mut border_color = match background_color {
+-                Some(color) => match color.tag {
+-                    BackgroundTag::Solid
+-                    | BackgroundTag::PatternSlash
+-                    | BackgroundTag::Checkerboard => color.solid,
+-
+-                    BackgroundTag::LinearGradient => color
+-                        .colors
+-                        .first()
+-                        .map(|stop| stop.color)
+-                        .unwrap_or_default(),
+-                },
+-                None => Hsla::default(),
+-            };
+-            border_color.a = 0.;
+-            window.paint_quad(quad(
+-                bounds,
+-                corner_radii,
+-                background_color.unwrap_or_default(),
+-                Edges::default(),
+-                border_color,
+-                self.border_style,
+-            ));
+-        }
+-
+-        window.paint_inset_shadows(bounds, corner_radii, &self.box_shadow);
+-
+-        continuation(window, cx);
+-
+-        if self.is_border_visible() {
+-            let border_widths = self.border_widths.to_pixels(rem_size);
+-            let mut background = self.border_color.unwrap_or_default();
+-            background.a = 0.;
+-            window.paint_quad(quad(
+-                bounds,
+-                corner_radii,
+-                background,
+-                border_widths,
+-                self.border_color.unwrap_or_default(),
+-                self.border_style,
+-            ));
+-        }
+-
+-        #[cfg(debug_assertions)]
+-        if self.debug_below {
+-            cx.remove_global::<DebugBelow>();
+-        }
++        window.with_paint_bounds_rounding(self.paint_rounding, |window| {
++            #[cfg(debug_assertions)]
++            if self.debug_below {
++                cx.set_global(DebugBelow)
++            }
++
++            #[cfg(debug_assertions)]
++            if self.debug || cx.has_global::<DebugBelow>() {
++                window.paint_quad(crate::outline(bounds, crate::red(), BorderStyle::default()));
++            }
++
++            let rem_size = window.rem_size();
++            let corner_radii = self
++                .corner_radii
++                .to_pixels(rem_size)
++                .clamp_radii_for_quad_size(bounds.size);
++
++            window.paint_drop_shadows(bounds, corner_radii, &self.box_shadow);
++            if self.outer_ring_width > px(0.) && !self.outer_ring_color.is_transparent() {
++                let width = self.outer_ring_width;
++                window.paint_quad(
++                    crate::outline(
++                        bounds.dilate(width),
++                        self.outer_ring_color,
++                        BorderStyle::Solid,
++                    )
++                    .border_widths(width)
++                    .corner_radii(corner_radii.map(|radius| *radius + width)),
++                );
++            }
++
++            let background_color = self.background.as_ref().and_then(Fill::color);
++            if background_color.is_some_and(|color| !color.is_transparent()) {
++                let mut border_color = match background_color {
++                    Some(color) => match color.tag {
++                        BackgroundTag::Solid
++                        | BackgroundTag::PatternSlash
++                        | BackgroundTag::Checkerboard => color.solid,
++
++                        BackgroundTag::LinearGradient => color
++                            .colors
++                            .first()
++                            .map(|stop| stop.color)
++                            .unwrap_or_default(),
++                    },
++                    None => Hsla::default(),
++                };
++                border_color.a = 0.;
++                window.paint_quad(quad(
++                    bounds,
++                    corner_radii,
++                    background_color.unwrap_or_default(),
++                    Edges::default(),
++                    border_color,
++                    self.border_style,
++                ));
++            }
++
++            window.paint_inset_shadows(bounds, corner_radii, &self.box_shadow);
++
++            continuation(window, cx);
++
++            if self.is_border_visible() {
++                let border_widths = self.border_widths.to_pixels(rem_size);
++                let mut background = self.border_color.unwrap_or_default();
++                background.a = 0.;
++                window.paint_quad(quad(
++                    bounds,
++                    corner_radii,
++                    background,
++                    border_widths,
++                    self.border_color.unwrap_or_default(),
++                    self.border_style,
++                ));
++            }
++
++            #[cfg(debug_assertions)]
++            if self.debug_below {
++                cx.remove_global::<DebugBelow>();
++            }
++        });
+     }
+ 
+     fn is_border_visible(&self) -> bool {
+@@ -772,6 +808,8 @@
+     fn default() -> Self {
+         Style {
+             display: Display::Block,
++            preserve_layout_bounds: false,
++            paint_rounding: None,
+             visibility: Visibility::Visible,
+             overflow: Point {
+                 x: Overflow::Visible,
+@@ -806,6 +844,8 @@
+             border_style: BorderStyle::default(),
+             corner_radii: Corners::default(),
+             box_shadow: Default::default(),
++            outer_ring_width: px(0.),
++            outer_ring_color: Hsla::default(),
+             text: TextStyleRefinement::default(),
+             mouse_cursor: None,
+             opacity: None,
+--- a/src/styled.rs
++++ b/src/styled.rs
+@@ -23,6 +23,33 @@
+     /// Returns a reference to the style memory of this element.
+     fn style(&mut self) -> &mut StyleRefinement;
+ 
++    /// Preserve fractional layout bounds for this element and its descendants.
++    /// This opts out of final device-pixel edge snapping, without changing
++    /// authored length or leaf measurement snapping.
++    fn preserve_layout_bounds(mut self) -> Self {
++        self.style().preserve_layout_bounds = Some(true);
++        self
++    }
++
++    /// Round half-pixel paint bounds toward positive infinity in this subtree.
++    fn paint_rounding_half_up(mut self) -> Self {
++        self.style().paint_rounding = Some(gpui::PaintBoundsRounding::HalfUp);
++        self
++    }
++
++    /// Restore the default half-toward-zero paint rounding in this subtree.
++    fn paint_rounding_half_toward_zero(mut self) -> Self {
++        self.style().paint_rounding = Some(gpui::PaintBoundsRounding::HalfTowardZero);
++        self
++    }
++
++    /// Paint an outside ring without changing the element's layout box.
++    fn ring(mut self, width: gpui::Pixels, color: Hsla) -> Self {
++        self.style().outer_ring_width = Some(width.max(px(0.)));
++        self.style().outer_ring_color = Some(color);
++        self
++    }
++
+     gpui_macros::style_helpers!();
+     gpui_macros::visibility_style_methods!();
+     gpui_macros::margin_style_methods!();
+--- a/src/taffy.rs
++++ b/src/taffy.rs
+@@ -1,19 +1,20 @@
+ use crate::{
+-    AbsoluteLength, App, Bounds, DefiniteLength, Edges, GridTemplate, Length, Pixels, Point, Size,
+-    Style, Window, size,
++    size,
+     util::{
+         ceil_to_device_pixel, round_half_toward_zero, round_stroke_to_device_pixel,
+         round_to_device_pixel,
+     },
++    AbsoluteLength, App, Bounds, DefiniteLength, Edges, GridTemplate, Length, Pixels, Point, Size,
++    Style, Window,
+ };
+ use collections::{FxHashMap, FxHashSet};
+ use std::{fmt::Debug, ops::Range};
+ use taffy::{
+-    TaffyTree, TraversePartialTree as _,
+     geometry::{Point as TaffyPoint, Rect as TaffyRect, Size as TaffySize},
+     prelude::{max_content, min_content},
+     style::AvailableSpace as TaffyAvailableSpace,
+     tree::NodeId,
++    TaffyTree, TraversePartialTree as _,
+ };
+ 
+ #[cfg(feature = "stacker")]
+@@ -27,6 +28,7 @@
+ 
+ struct NodeContext {
+     measure: NodeMeasureFn,
++    snap_measurement: bool,
+ }
+ pub struct TaffyLayoutEngine {
+     taffy: TaffyTree<NodeContext>,
+@@ -34,6 +36,7 @@
+     /// Unrounded absolute border-box top-left per-node coordinate in device pixels.
+     absolute_outer_origins: FxHashMap<LayoutId, Point<f32>>,
+     computed_layouts: FxHashSet<LayoutId>,
++    preserved_layout_bounds: FxHashSet<LayoutId>,
+     layout_bounds_scratch_space: Vec<LayoutId>,
+ }
+ 
+@@ -48,6 +51,7 @@
+             absolute_layout_bounds: FxHashMap::default(),
+             absolute_outer_origins: FxHashMap::default(),
+             computed_layouts: FxHashSet::default(),
++            preserved_layout_bounds: FxHashSet::default(),
+             layout_bounds_scratch_space: Vec::new(),
+         }
+     }
+@@ -57,6 +61,7 @@
+         self.absolute_layout_bounds.clear();
+         self.absolute_outer_origins.clear();
+         self.computed_layouts.clear();
++        self.preserved_layout_bounds.clear();
+     }
+ 
+     pub fn request_layout(
+@@ -68,7 +73,7 @@
+     ) -> LayoutId {
+         let taffy_style = style.to_taffy(rem_size, scale_factor);
+ 
+-        if children.is_empty() {
++        let id = if children.is_empty() {
+             self.taffy
+                 .new_leaf(taffy_style)
+                 .expect(EXPECT_MESSAGE)
+@@ -79,7 +84,11 @@
+                 .new_with_children(taffy_style, LayoutId::to_taffy_slice(children))
+                 .expect(EXPECT_MESSAGE)
+                 .into()
+-        }
++        };
++        if style.preserve_layout_bounds {
++            self.preserved_layout_bounds.insert(id);
++        }
++        id
+     }
+ 
+     pub fn request_measured_layout(
+@@ -87,23 +96,52 @@
+         style: Style,
+         rem_size: Pixels,
+         scale_factor: f32,
+-        measure: impl FnMut(
+-            Size<Option<Pixels>>,
+-            Size<AvailableSpace>,
+-            &mut Window,
+-            &mut App,
+-        ) -> Size<Pixels>
+-        + 'static,
++        measure: impl FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
++            + 'static,
++    ) -> LayoutId {
++        self.request_measured_layout_with_snap(style, rem_size, scale_factor, true, measure)
++    }
++
++    pub fn request_precise_measured_layout(
++        &mut self,
++        style: Style,
++        rem_size: Pixels,
++        scale_factor: f32,
++        measure: impl FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
++            + 'static,
++    ) -> LayoutId {
++        self.request_measured_layout_with_snap(style, rem_size, scale_factor, false, measure)
++    }
++
++    fn request_measured_layout_with_snap(
++        &mut self,
++        style: Style,
++        rem_size: Pixels,
++        scale_factor: f32,
++        snap_measurement: bool,
++        measure: impl FnMut(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
++            + 'static,
+     ) -> LayoutId {
+         let taffy_style = style.to_taffy(rem_size, scale_factor);
+         let measure = Box::new(measure) as Box<MeasureFn>;
+         #[cfg(feature = "stacker")]
+         let measure = StackSafe::new(measure);
+ 
+-        self.taffy
+-            .new_leaf_with_context(taffy_style, NodeContext { measure })
++        let id = self
++            .taffy
++            .new_leaf_with_context(
++                taffy_style,
++                NodeContext {
++                    measure,
++                    snap_measurement,
++                },
++            )
+             .expect(EXPECT_MESSAGE)
+-            .into()
++            .into();
++        if style.preserve_layout_bounds {
++            self.preserved_layout_bounds.insert(id);
++        }
++        id
+     }
+ 
+     /// Treats any `auto` dimension of the given node's style as filling `size`.
+@@ -261,7 +299,13 @@
+ 
+                     let measured_size: Size<Pixels> =
+                         (node_context.measure)(known_dimensions, available_space, window, cx);
+-                    snap_measured_size_to_device_pixels(measured_size, scale_factor).into()
++                    if node_context.snap_measurement {
++                        snap_measured_size_to_device_pixels(measured_size, scale_factor).into()
++                    } else {
++                        measured_size
++                            .map(|length| length.0.max(0.0) * scale_factor)
++                            .into()
++                    }
+                 },
+             )
+             .expect(EXPECT_MESSAGE);
+@@ -368,10 +412,20 @@
+             .insert(id, absolute_outer_origin);
+ 
+         let absolute_far = absolute_outer_origin + Point::from(Size::from(layout_size));
+-        let snapped_bounds = Bounds::from_corners(
+-            absolute_outer_origin.map(round_half_toward_zero),
+-            absolute_far.map(round_half_toward_zero),
+-        );
++        let preserve = self.preserved_layout_bounds.contains(&id)
++            || parent.is_some_and(|parent| {
++                self.preserved_layout_bounds
++                    .contains(&LayoutId::from(parent))
++            });
++        let snapped_bounds = if preserve {
++            self.preserved_layout_bounds.insert(id);
++            Bounds::from_corners(absolute_outer_origin, absolute_far)
++        } else {
++            Bounds::from_corners(
++                absolute_outer_origin.map(round_half_toward_zero),
++                absolute_far.map(round_half_toward_zero),
++            )
++        };
+ 
+         let bounds = (snapped_bounds / scale_factor).map(Pixels);
+         self.absolute_layout_bounds.insert(id, bounds);
+@@ -747,6 +801,58 @@
+     use super::*;
+ 
+     #[test]
++    fn preserved_subtree_bounds_retain_centering_and_reset_between_layouts() {
++        let mut engine = TaffyLayoutEngine::new();
++        for scale in [1.0, 2.0] {
++            for preserve in [true, false, true, false] {
++                engine.clear();
++                let child = engine.request_layout(
++                    Style {
++                        size: size(crate::px(24.).into(), crate::px(24.).into()),
++                        flex_shrink: 0.,
++                        ..Default::default()
++                    },
++                    Pixels(16.),
++                    scale,
++                    &[],
++                );
++                let root = engine.request_layout(
++                    Style {
++                        display: crate::Display::Flex,
++                        align_items: Some(crate::AlignItems::Center),
++                        size: size(crate::px(100.).into(), crate::px(36.).into()),
++                        border_widths: Edges {
++                            bottom: crate::px(1.).into(),
++                            ..Edges::default()
++                        },
++                        preserve_layout_bounds: preserve,
++                        ..Default::default()
++                    },
++                    Pixels(16.),
++                    scale,
++                    &[child],
++                );
++                engine
++                    .taffy
++                    .compute_layout(
++                        root.into(),
++                        taffy::geometry::Size {
++                            width: TaffyAvailableSpace::MaxContent,
++                            height: TaffyAvailableSpace::MaxContent,
++                        },
++                    )
++                    .unwrap();
++                let bounds = engine.layout_bounds(child, scale);
++                assert_eq!(
++                    bounds.origin.y,
++                    Pixels(if preserve || scale == 2. { 5.5 } else { 5. })
++                );
++                assert_eq!(bounds.size.height, Pixels(24.));
++            }
++        }
++    }
++
++    #[test]
+     fn border_widths_to_taffy_use_stroke_snapping() {
+         let border_widths = Edges {
+             top: Pixels(0.0).into(),
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -1156,6 +1156,7 @@
+     pub(crate) rendered_entity_stack: Vec<EntityId>,
+     pub(crate) element_offset_stack: Vec<Point<Pixels>>,
+     pub(crate) element_opacity: f32,
++    paint_rounding: crate::PaintBoundsRounding,
+     pub(crate) content_mask_stack: Vec<ContentMask<Pixels>>,
+     pub(crate) requested_autoscroll: Option<Bounds<Pixels>>,
+     /// The [`TextInputConfiguration`] most recently forwarded to the platform
+@@ -1192,6 +1193,7 @@
+     #[cfg(feature = "profiler")]
+     window_profiler: profiler::WindowProfiler,
+     last_input_modality: InputModality,
++    tab_navigation_focus_visible: bool,
+     touch_gestures: TouchGestureRecognizer,
+     pub(crate) refreshing: bool,
+     pub(crate) activation_observers: SubscriberSet<(), AnyObserver>,
+@@ -1854,6 +1856,7 @@
+             element_offset_stack: Vec::new(),
+             content_mask_stack: Vec::new(),
+             element_opacity: 1.0,
++            paint_rounding: crate::PaintBoundsRounding::HalfTowardZero,
+             requested_autoscroll: None,
+             last_text_input_configuration: None,
+             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
+@@ -1883,6 +1886,7 @@
+             #[cfg(feature = "profiler")]
+             window_profiler: profiler::WindowProfiler::new(handle.window_id())?,
+             last_input_modality: InputModality::Mouse,
++            tab_navigation_focus_visible: false,
+             touch_gestures: TouchGestureRecognizer::new(
+                 cx.platform
+                     .gestures()
+@@ -2741,10 +2745,16 @@
+     #[inline]
+     fn snap_bounds(&self, bounds: Bounds<Pixels>) -> Bounds<ScaledPixels> {
+         let scale_factor = self.scale_factor();
+-        let left = round_to_device_pixel(bounds.left().0, scale_factor);
+-        let top = round_to_device_pixel(bounds.top().0, scale_factor);
+-        let right = round_to_device_pixel(bounds.right().0, scale_factor).max(left);
+-        let bottom = round_to_device_pixel(bounds.bottom().0, scale_factor).max(top);
++        let round = |value: Pixels| match self.paint_rounding {
++            crate::PaintBoundsRounding::HalfTowardZero => {
++                round_to_device_pixel(value.0, scale_factor)
++            }
++            crate::PaintBoundsRounding::HalfUp => (value.0 * scale_factor + 0.5).floor(),
++        };
++        let left = round(bounds.left());
++        let top = round(bounds.top());
++        let right = round(bounds.right()).max(left);
++        let bottom = round(bounds.bottom()).max(top);
+         Bounds::from_corners(
+             point(ScaledPixels(left), ScaledPixels(top)),
+             point(ScaledPixels(right), ScaledPixels(bottom)),
+@@ -2845,6 +2855,13 @@
+     /// This is used for focus-visible styling to show focus indicators only for keyboard navigation.
+     pub fn last_input_was_keyboard(&self) -> bool {
+         self.last_input_modality == InputModality::Keyboard
++    }
++
++    /// Whether a Tab traversal initiated the current keyboard focus session.
++    /// Control interaction keys preserve this session; shortcuts and pointer
++    /// presses end it without changing the normal focus-visible policy.
++    pub fn tab_navigation_focus_visible(&self) -> bool {
++        self.tab_navigation_focus_visible
+     }
+ 
+     /// The current state of the keyboard's capslock
+@@ -3249,6 +3266,15 @@
+                         tooltip_bounds.origin.y - tooltip_bounds.bottom() - window_bounds.bottom(),
+                     );
+                 }
++            }
++
++            if let Some(anchor) = tooltip_request.tooltip.anchor {
++                tooltip_bounds = anchor.tooltip_bounds_at_scale(
++                    tooltip_size,
++                    self.viewport_size(),
++                    tooltip_request.tooltip.collision_padding.unwrap_or(px(4.)),
++                    self.scale_factor(),
++                );
+             }
+ 
+             // It's possible for an element to have an active tooltip while not being painted (e.g.
+@@ -3606,6 +3632,20 @@
+         result
+     }
+ 
++    pub(crate) fn with_paint_bounds_rounding<R>(
++        &mut self,
++        rounding: Option<crate::PaintBoundsRounding>,
++        f: impl FnOnce(&mut Self) -> R,
++    ) -> R {
++        let Some(rounding) = rounding else {
++            return f(self);
++        };
++        let previous = std::mem::replace(&mut self.paint_rounding, rounding);
++        let result = f(self);
++        self.paint_rounding = previous;
++        result
++    }
++
+     pub(crate) fn with_element_opacity<R>(
+         &mut self,
+         opacity: Option<f32>,
+@@ -4522,16 +4562,29 @@
+         let tile = self
+             .sprite_atlas
+             .get_or_insert_with(&params.into(), &mut || {
+-                Ok(Some((
+-                    data.size(frame_index),
+-                    Cow::Borrowed(
+-                        data.as_bytes(frame_index)
+-                            .expect("It's the caller's job to pass a valid frame index"),
+-                    ),
+-                )))
++                Ok(data
++                    .atlas_data(frame_index)
++                    .map(|(size, pixels)| (size, Cow::Owned(pixels))))
+             })?
+             .expect("Callback above only returns Some");
+ 
++        // atlas_data includes a replicated edge for linear filtering. Only the
++        // original image texels participate in the sprite's UV rectangle.
++        let tile = AtlasTile {
++            bounds: Bounds {
++                origin: tile.bounds.origin
++                    + point(
++                        DevicePixels(
++                            (tile.bounds.size.width.0 - data.size(frame_index).width.0) / 2,
++                        ),
++                        DevicePixels(
++                            (tile.bounds.size.height.0 - data.size(frame_index).height.0) / 2,
++                        ),
++                    ),
++                size: data.size(frame_index),
++            },
++            ..tile
++        };
+         let visible_bounds_snapped = self.snap_bounds(visible_bounds);
+ 
+         let sub_tile = if visible_bounds == image_bounds {
+@@ -4689,6 +4742,24 @@
+             .as_mut()
+             .unwrap()
+             .request_measured_layout(style, rem_size, scale_factor, measure)
++    }
++
++    /// Measures a leaf without rounding its returned lengths before layout.
++    /// Fractional advances accumulate through the layout tree; ordinary outer
++    /// box edge snapping remains in effect. Intended for precise prose metrics.
++    pub fn request_precise_measured_layout<F>(&mut self, style: Style, measure: F) -> LayoutId
++    where
++        F: Fn(Size<Option<Pixels>>, Size<AvailableSpace>, &mut Window, &mut App) -> Size<Pixels>
++            + 'static,
++    {
++        self.invalidator.debug_assert_prepaint();
++
++        let rem_size = self.rem_size();
++        let scale_factor = self.scale_factor();
++        self.layout_engine
++            .as_mut()
++            .unwrap()
++            .request_precise_measured_layout(style, rem_size, scale_factor, measure)
+     }
+ 
+     /// Compute the layout for the given id within the given available space.
+@@ -5038,6 +5109,37 @@
+         // Track input modality for focus-visible styling and hover suppression.
+         // Hover is suppressed during keyboard modality so that keyboard navigation
+         // doesn't show hover highlights on the item under the mouse cursor.
++        let old_tab_focus = self.tab_navigation_focus_visible;
++        match &event {
++            PlatformInput::KeyDown(event) => {
++                let key = event.keystroke.key.as_str();
++                if key == "tab" {
++                    self.tab_navigation_focus_visible = true;
++                } else if !matches!(
++                    key,
++                    "enter"
++                        | "space"
++                        | "escape"
++                        | "up"
++                        | "down"
++                        | "left"
++                        | "right"
++                        | "shift"
++                        | "cmd"
++                        | "ctrl"
++                        | "alt"
++                        | "super"
++                        | "meta"
++                        | "control"
++                ) {
++                    self.tab_navigation_focus_visible = false;
++                }
++            }
++            PlatformInput::MouseDown(_) | PlatformInput::Touch(_) => {
++                self.tab_navigation_focus_visible = false;
++            }
++            _ => {}
++        }
+         let old_modality = self.last_input_modality;
+         self.last_input_modality = match &event {
+             PlatformInput::KeyDown(_) => InputModality::Keyboard,
+@@ -5045,7 +5147,9 @@
+             PlatformInput::Touch(_) => InputModality::Touch,
+             _ => self.last_input_modality,
+         };
+-        if self.last_input_modality != old_modality {
++        if self.last_input_modality != old_modality
++            || old_tab_focus != self.tab_navigation_focus_visible
++        {
+             self.refresh();
+         }
+ 
+@@ -5053,6 +5157,43 @@
+         cx.propagate_event = true;
+         // Handlers may set this to true by calling `prevent_default`.
+         self.default_prevented = false;
++
++        if let PlatformInput::KeyDown(key) = &event {
++            if matches!(key.keystroke.key.as_str(), "escape" | "enter" | "space") {
++                let dismissals = self
++                    .rendered_frame
++                    .tooltip_requests
++                    .iter()
++                    .rev()
++                    .filter_map(|request| {
++                        request
++                            .as_ref()
++                            .and_then(|request| request.tooltip.dismiss.clone())
++                    })
++                    .collect::<Vec<_>>();
++                let composing = if dismissals.is_empty() {
++                    false
++                } else if let Some(mut input) = self.platform_window.take_input_handler() {
++                    let composing = input.is_composing(self, cx);
++                    self.platform_window.set_input_handler(input);
++                    composing
++                } else {
++                    false
++                };
++                if !composing {
++                    for dismiss in dismissals {
++                        if dismiss(key, self, cx) {
++                            cx.propagate_event = false;
++                            self.default_prevented = true;
++                            return DispatchEventResult {
++                                propagate: false,
++                                default_prevented: true,
++                            };
++                        }
++                    }
++                }
++            }
++        }
+ 
+         let event = match event {
+             // Track the mouse position with our own state, since accessing the platform
+@@ -6998,6 +7139,71 @@
+         WindowOptions, canvas, div, point, px, size,
+     };
+ 
++    struct PaintRoundingView {
++        scale: f32,
++    }
++    impl Render for PaintRoundingView {
++        fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
++            let child = || div().w(px(8.)).h(px(4. / self.scale)).bg(crate::red());
++            let parent = |x| {
++                div()
++                    .absolute()
++                    .left(px(x))
++                    .top_0()
++                    .w(px(8.))
++                    .h(px(15. / self.scale))
++                    .flex()
++                    .items_center()
++            };
++            div()
++                .size_full()
++                .preserve_layout_bounds()
++                .child(parent(10.).child(child()))
++                .child(parent(30.).paint_rounding_half_up().child(child()))
++                .child(
++                    parent(50.)
++                        .paint_rounding_half_up()
++                        .child(child().paint_rounding_half_toward_zero()),
++                )
++                .child(parent(70.).child(child()))
++        }
++    }
++
++    #[test]
++    fn paint_rounding_is_inherited_overridable_and_scoped_at_each_device_scale() {
++        for scale in [1., 2.] {
++            let mut app = TestAppContext::single();
++            let window = app.add_window(|_, _| PaintRoundingView { scale });
++            app.update_window(window.into(), |_, window, cx| {
++                window.scale_factor = scale;
++                window.refresh();
++                window.draw(cx).clear(cx);
++                let mut quads = window.painted_quads();
++                quads.sort_by(|a, b| a.bounds.left().0.total_cmp(&b.bounds.left().0));
++                assert_eq!(quads.len(), 4);
++                let tops: Vec<_> = quads.iter().map(|q| q.bounds.top().0).collect();
++                assert_eq!(tops, vec![5., 6., 5., 5.]);
++                assert!(quads.iter().all(|q| q.bounds.size.height.0 == 4.));
++                let negative = window.with_paint_bounds_rounding(
++                    Some(crate::PaintBoundsRounding::HalfUp),
++                    |window| {
++                        window.snap_bounds(Bounds::new(
++                            point(px(-5.5 / scale), px(-5.5 / scale)),
++                            size(px(4. / scale), px(4. / scale)),
++                        ))
++                    },
++                );
++                assert_eq!(negative.origin.x.0, -5.);
++                assert_eq!(negative.origin.y.0, -5.);
++                assert_eq!(
++                    window.paint_rounding,
++                    crate::PaintBoundsRounding::HalfTowardZero
++                );
++            })
++            .unwrap();
++        }
++    }
++
+     struct EmptyView;
+ 
+     impl Render for EmptyView {

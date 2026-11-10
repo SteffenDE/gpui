@@ -10,6 +10,24 @@ defmodule GPUI.Codegen.Native.TestBoundary do
   alias RustQ.Type, as: R
 
   @nif schedule: :dirty_io
+  @spec native_test_double_click(R.resource(NativeTest.NativeTestSessionResource.t()), String.t()) ::
+          R.nif_result(term())
+  defnif(native_test_double_click(session, target),
+    do: native_test_double_click_impl(nif_env(), session, target_request(target))
+  )
+
+  @nif schedule: :dirty_io
+  @spec native_test_pinch(
+          R.resource(NativeTest.NativeTestSessionResource.t()),
+          String.t(),
+          R.f64(),
+          String.t()
+        ) :: R.nif_result(term())
+  defnif(native_test_pinch(session, target, delta, phase),
+    do: native_test_pinch_impl(nif_env(), session, target, delta, phase)
+  )
+
+  @nif schedule: :dirty_io
   @spec native_test_drag(
           R.resource(NativeTest.NativeTestSessionResource.t()),
           R.f64(),

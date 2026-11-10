@@ -3,8 +3,8 @@ use crate::*;
 mod generated_test_operations {
     #[cfg(feature = "native-test")]
     use crate::native_test::{
-        advance, bounds, click, click_at, drag, events, focus, idle, input, key, render, resize,
-        scroll, start, stop,
+        advance, bounds, click, click_at, double_click, drag, events, focus, idle, input, key,
+        pinch, render, resize, scroll, start, stop,
     };
     use crate::*;
     use rustler::Error;
@@ -12,10 +12,10 @@ mod generated_test_operations {
 }
 pub(crate) use generated_test_operations::{
     native_test_advance_impl, native_test_bounds_impl, native_test_click_at_impl,
-    native_test_click_impl, native_test_drag_impl, native_test_events_impl, native_test_focus_impl,
-    native_test_idle_impl, native_test_input_impl, native_test_key_impl, native_test_render_impl,
-    native_test_resize_impl, native_test_scroll_impl, native_test_start_impl,
-    native_test_stop_impl,
+    native_test_click_impl, native_test_double_click_impl, native_test_drag_impl,
+    native_test_events_impl, native_test_focus_impl, native_test_idle_impl, native_test_input_impl,
+    native_test_key_impl, native_test_pinch_impl, native_test_render_impl, native_test_resize_impl,
+    native_test_scroll_impl, native_test_start_impl, native_test_stop_impl,
 };
 
 pub(crate) fn host_info_impl<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
@@ -64,6 +64,141 @@ pub(crate) fn set_app_identity_impl<'a>(
     _name: String,
 ) -> NifResult<Term<'a>> {
     Ok((atoms::ok(), atoms::ok()).encode(env))
+}
+
+pub(crate) fn show_system_notification_impl<'a>(
+    env: Env<'a>,
+    tag: String,
+    title: String,
+    subtitle: String,
+    body: String,
+    sound: bool,
+) -> NifResult<Term<'a>> {
+    if tag.is_empty()
+        || tag.len() > 512
+        || title.len() > 1024
+        || subtitle.len() > 1024
+        || body.len() > 16384
+    {
+        return Ok((atoms::error(), "invalid_notification").encode(env));
+    }
+    #[cfg(feature = "real-gpui")]
+    return notification_command(env, |reply| WindowCommand::ShowSystemNotification {
+        tag,
+        title,
+        subtitle,
+        body,
+        sound,
+        reply,
+    });
+    #[cfg(not(feature = "real-gpui"))]
+    {
+        let _ = (tag, title, subtitle, body, sound);
+        Ok((atoms::ok(), atoms::ok()).encode(env))
+    }
+}
+
+pub(crate) fn dismiss_system_notification_impl<'a>(
+    env: Env<'a>,
+    tag: String,
+) -> NifResult<Term<'a>> {
+    if tag.is_empty() || tag.len() > 512 {
+        return Ok((atoms::error(), "invalid_notification").encode(env));
+    }
+    #[cfg(feature = "real-gpui")]
+    return notification_command(env, |reply| WindowCommand::DismissSystemNotification {
+        tag,
+        reply,
+    });
+    #[cfg(not(feature = "real-gpui"))]
+    Ok((atoms::ok(), atoms::ok()).encode(env))
+}
+
+pub(crate) fn subscribe_system_notifications_impl<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
+    #[cfg(feature = "real-gpui")]
+    return notification_command(env, |reply| WindowCommand::SubscribeSystemNotifications {
+        pid: env.pid(),
+        reply,
+    });
+    #[cfg(not(feature = "real-gpui"))]
+    Ok((atoms::ok(), atoms::ok()).encode(env))
+}
+
+#[cfg(feature = "real-gpui")]
+fn notification_command<'a>(
+    env: Env<'a>,
+    command: impl FnOnce(crate::window::WindowCommandReply) -> WindowCommand,
+) -> NifResult<Term<'a>> {
+    let sender = crate::runtime::gpui_command_sender()
+        .map_err(|reason| rustler::Error::Term(Box::new(reason)))?;
+    let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+    sender
+        .unbounded_send(command(reply))
+        .map_err(|_| rustler::Error::Term(Box::new("gpui_runtime_stopped")))?;
+    encode_command_result(
+        env,
+        receiver
+            .recv()
+            .map_err(|_| "gpui_runtime_stopped".to_string())
+            .and_then(|result| result)
+            .map(|()| atoms::ok()),
+    )
+}
+
+pub(crate) fn activate_window_impl<'a>(
+    env: Env<'a>,
+    runtime: ResourceArc<RuntimeResource>,
+    window_id: u64,
+) -> NifResult<Term<'a>> {
+    #[cfg(feature = "real-gpui")]
+    {
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        let command = WindowCommand::ActivateWindow {
+            runtime_id: runtime.id,
+            window_id,
+            reply,
+        };
+        encode_command_result(
+            env,
+            execute_window_command(&runtime, command, receiver).map(|()| atoms::ok()),
+        )
+    }
+    #[cfg(not(feature = "real-gpui"))]
+    {
+        let _ = (runtime, window_id);
+        Ok((atoms::error(), "activation_not_supported").encode(env))
+    }
+}
+
+pub(crate) fn system_notification_status_impl<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
+    system_notification_permission(env, false)
+}
+
+pub(crate) fn request_system_notifications_impl<'a>(env: Env<'a>) -> NifResult<Term<'a>> {
+    system_notification_permission(env, true)
+}
+
+fn system_notification_permission<'a>(env: Env<'a>, request: bool) -> NifResult<Term<'a>> {
+    #[cfg(feature = "real-gpui")]
+    let result = (|| {
+        let sender = crate::runtime::gpui_command_sender().map_err(str::to_string)?;
+        let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+        sender
+            .unbounded_send(WindowCommand::SystemNotificationPermission { request, reply })
+            .map_err(|_| "gpui_runtime_stopped".to_string())?;
+        receiver
+            .recv()
+            .map_err(|_| "gpui_runtime_stopped".to_string())?
+    })();
+    #[cfg(not(feature = "real-gpui"))]
+    let result: Result<String, String> = {
+        let _ = request;
+        Ok("unsupported".to_string())
+    };
+    match result {
+        Ok(status) => Ok((atoms::ok(), status).encode(env)),
+        Err(reason) => Ok((atoms::error(), reason).encode(env)),
+    }
 }
 
 pub(crate) fn text_buffer_new_impl<'a>(
@@ -177,15 +312,20 @@ pub(crate) fn open_window_impl<'a>(
         height,
         min_width,
         min_height,
+        restore_bounds,
+        cascade_offset,
+        center_in_work_area,
+        geometry,
         resizable,
         content_chrome,
         close_request,
         focus,
         blur,
+        appearance,
         commands,
         tree,
     } = config;
-    let tree = decode_element_node(tree)?;
+    let tree = decode_tree(tree)?;
     let min_size = min_width.zip(min_height);
     let commands = validate_window_commands(commands)?;
     let shared_window = Arc::new(WindowState::new(tree, commands));
@@ -198,11 +338,16 @@ pub(crate) fn open_window_impl<'a>(
         width,
         height,
         min_size,
+        restore_bounds,
+        cascade_offset,
+        center_in_work_area,
+        geometry,
         resizable,
         content_chrome,
         close_request,
         focus,
         blur,
+        appearance,
         window_state: shared_window,
         runtime: runtime.state.clone(),
         reply,
@@ -420,6 +565,7 @@ pub(crate) fn set_theme_impl<'a>(
     mode: Theme,
 ) -> NifResult<Term<'a>> {
     let (native_mode, encoded_mode) = match mode {
+        Theme::System => (NativeThemeMode::System, atoms::system()),
         Theme::Light => (NativeThemeMode::Light, atoms::light()),
         Theme::Dark => (NativeThemeMode::Dark, atoms::dark()),
     };
@@ -432,6 +578,26 @@ pub(crate) fn set_theme_impl<'a>(
     encode_command_result(
         env,
         execute_window_command(&runtime, command, receiver).map(|()| encoded_mode),
+    )
+}
+
+#[cfg(feature = "real-gpui")]
+pub(crate) fn load_font_impl<'a>(
+    env: Env<'a>,
+    runtime: ResourceArc<RuntimeResource>,
+    bytes: rustler::Binary<'a>,
+) -> NifResult<Term<'a>> {
+    if bytes.is_empty() || bytes.len() > 32 * 1024 * 1024 {
+        return Err(rustler::Error::BadArg);
+    }
+    let (reply, receiver) = std::sync::mpsc::sync_channel(1);
+    let command = WindowCommand::LoadFont {
+        bytes: bytes.as_slice().to_vec(),
+        reply,
+    };
+    encode_command_result(
+        env,
+        execute_window_command(&runtime, command, receiver).map(|()| atoms::ok()),
     )
 }
 
@@ -525,6 +691,7 @@ pub(crate) fn inject_event_impl<'a>(
     runtime: ResourceArc<RuntimeResource>,
     request: InjectRequest<'a>,
 ) -> NifResult<Term<'a>> {
+    let raw_event = request.event;
     let (kind, window_id, event_name, value) = decode_inject(request)?;
 
     match kind {
@@ -548,13 +715,22 @@ pub(crate) fn inject_event_impl<'a>(
         }
         InjectKind::Click => {
             let event_name = event_name.ok_or(rustler::Error::BadArg)?;
-            push_event(
-                &runtime.state,
+            let event = if let Ok(modifiers) = raw_event.map_get(atoms::modifiers()) {
+                NativeEvent::ModifiedClick {
+                    window_id,
+                    event: event_name,
+                    control: modifiers.map_get(atoms::control())?.decode()?,
+                    alt: modifiers.map_get(atoms::alt())?.decode()?,
+                    shift: modifiers.map_get(atoms::shift())?.decode()?,
+                    platform: modifiers.map_get(atoms::platform())?.decode()?,
+                }
+            } else {
                 NativeEvent::Click {
                     window_id,
                     event: event_name,
-                },
-            )?;
+                }
+            };
+            push_event(&runtime.state, event)?;
         }
         InjectKind::Command => {
             let event_name = event_name.ok_or(rustler::Error::BadArg)?;
@@ -566,7 +742,8 @@ pub(crate) fn inject_event_impl<'a>(
                 },
             )?;
         }
-        InjectKind::Change
+        InjectKind::Open
+        | InjectKind::Change
         | InjectKind::Release
         | InjectKind::Search
         | InjectKind::Submit
@@ -575,6 +752,7 @@ pub(crate) fn inject_event_impl<'a>(
             let event_name = event_name.ok_or(rustler::Error::BadArg)?;
             let kind = match kind {
                 InjectKind::Change => InputKind::Change,
+                InjectKind::Open => InputKind::Open,
                 #[cfg(feature = "components")]
                 InjectKind::Release => InputKind::Release,
                 #[cfg(feature = "components")]

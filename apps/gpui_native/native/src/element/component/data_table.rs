@@ -473,6 +473,10 @@ fn render_visible_rows(
         for (column_index, (column, cell)) in table.columns.iter().zip(row.cells).enumerate() {
             let cell_child = {
                 let mut cell_context = ElementRenderContext {
+                    pointer_observers: root.pointer_observers.clone(),
+                    scrolls: root.scrolls.clone(),
+                    horizontal_groups: root.horizontal_groups.clone(),
+                    tooltip_focus_owner: None,
                     runtime: runtime.clone(),
                     window_id,
                     next_element_id: 0,

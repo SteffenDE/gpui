@@ -12,6 +12,8 @@ defmodule GPUI.Codegen.Native.TestBoundaryTest do
         native_test_bounds: 2,
         native_test_focus: 2,
         native_test_click: 2,
+        native_test_double_click: 2,
+        native_test_pinch: 4,
         native_test_click_at: 3,
         native_test_scroll: 4,
         native_test_input: 2,

@@ -29,6 +29,11 @@ pub(crate) fn render_dialog(
         Some(slots) => slots,
         None => return invalid_slots(),
     };
+    let mut content = content;
+    if node.fullscreen {
+        content.style.width = Some(context.window.viewport_size().width.into());
+        content.style.height = Some(context.window.viewport_size().height.into());
+    }
     let content_tree = dialog_content_tree(content);
 
     if context.components.dialog_mut(&node.id).is_none() {
@@ -46,12 +51,17 @@ pub(crate) fn render_dialog(
         let config = Arc::new(Mutex::new(DialogConfig {
             title: node.title.clone(),
             show_title: node.show_title,
+            fullscreen: node.fullscreen,
             width: node.width.clamp(1.0, 4096.0) as f32,
             margin_top: node
                 .margin_top
                 .map(|margin| margin.clamp(0.0, 4096.0) as f32),
+            margin_top_ratio: node
+                .margin_top_ratio
+                .map(|ratio| ratio.clamp(0.0, 1.0) as f32),
             overlay: node.overlay,
             closable: node.closable,
+            pointer_dismiss: node.pointer_dismiss,
             keyboard: node.keyboard,
             close_button: node.close_button,
             style: node.style.clone(),
@@ -107,6 +117,21 @@ pub(crate) fn render_dialog(
                 key_handler,
             )
         });
+        let parent_view = context.window.current_view();
+        let resize_config = config.clone();
+        let resize_opened = opened.clone();
+        let resize_subscription = content_view.update(context.cx, |_view, cx| {
+            cx.observe_window_bounds(context.window, move |_view, _window, cx| {
+                let relative = resize_config
+                    .lock()
+                    .is_ok_and(|config| config.margin_top_ratio.is_some());
+                let open = resize_opened.lock().is_ok_and(|open| *open);
+                if relative && open {
+                    gpui::App::notify(cx, parent_view);
+                    cx.notify();
+                }
+            })
+        });
         context.components.insert_dialog(
             &node.id,
             ComponentDialog {
@@ -122,6 +147,7 @@ pub(crate) fn render_dialog(
                 config,
                 content: content_view,
                 content_state,
+                _resize: resize_subscription,
             },
         );
     }
@@ -143,12 +169,17 @@ pub(crate) fn render_dialog(
         *config = DialogConfig {
             title: node.title.clone(),
             show_title: node.show_title,
+            fullscreen: node.fullscreen,
             width: node.width.clamp(1.0, 4096.0) as f32,
             margin_top: node
                 .margin_top
                 .map(|margin| margin.clamp(0.0, 4096.0) as f32),
+            margin_top_ratio: node
+                .margin_top_ratio
+                .map(|ratio| ratio.clamp(0.0, 1.0) as f32),
             overlay: node.overlay,
             closable: node.closable,
+            pointer_dismiss: node.pointer_dismiss,
             keyboard: node.keyboard,
             close_button: node.close_button,
             style: node.style.clone(),
@@ -204,28 +235,57 @@ pub(crate) fn render_dialog(
             let callback_effective_open = callback_effective_open.clone();
             let callback_opened = callback_opened.clone();
             let config = config.clone();
-            window.open_dialog(cx, move |dialog, _window, _cx| {
+            window.open_dialog(cx, move |dialog, window, _cx| {
                 let config = config
                     .lock()
                     .map(|config| config.clone())
                     .unwrap_or(DialogConfig {
                         title: "Dialog".to_string(),
                         show_title: true,
+                        fullscreen: false,
                         width: 448.0,
                         margin_top: None,
+                        margin_top_ratio: None,
                         overlay: true,
                         closable: true,
+                        pointer_dismiss: true,
                         keyboard: true,
                         close_button: true,
                         style: crate::StyleAttrs::default(),
                     });
                 let dialog = super::super::apply_component_styles(dialog, config.style)
-                    .width(gpui::px(config.width))
-                    .when_some(config.margin_top, |dialog, margin| {
-                        dialog.margin_top(gpui::px(margin))
+                    .width(if config.fullscreen {
+                        window.viewport_size().width
+                    } else {
+                        gpui::px(config.width)
                     })
+                    .when(config.fullscreen, |dialog| {
+                        use gpui::Styled;
+                        dialog
+                            .h(window.viewport_size().height)
+                            .p_0()
+                            .gap_0()
+                            .border_0()
+                            .rounded_none()
+                    })
+                    .when_some(
+                        if config.fullscreen {
+                            Some(0.0)
+                        } else {
+                            config.margin_top
+                        },
+                        |dialog, margin| dialog.margin_top(gpui::px(margin)),
+                    )
+                    .when_some(
+                        if config.fullscreen {
+                            None
+                        } else {
+                            config.margin_top_ratio
+                        },
+                        |dialog, ratio| dialog.margin_top(window.viewport_size().height * ratio),
+                    )
                     .overlay(config.overlay)
-                    .overlay_closable(config.closable)
+                    .overlay_closable(config.closable && config.pointer_dismiss)
                     .keyboard(config.keyboard && config.closable)
                     .close_button(config.close_button)
                     // Enter belongs to the content, such as an input's submit;
@@ -414,9 +474,29 @@ fn dialog_content_tree(content: DialogContentComponentNode) -> crate::ElementNod
         id: None,
         accessibility: crate::AccessibilitySemantics::default(),
         children: content.children,
+        pointer: None,
+        pointer_position: None,
+        pointer_down: None,
+        window_pointer_position: None,
+        window_pointer_up: None,
+        clipboard_write: None,
+        clipboard_text: None,
+        clipboard_write_request: 0,
+        clipboard_without_primary: false,
         click: None,
         bounds_change: None,
+        scrollbar: false,
+        scroll_top: 0.0,
+        scroll_left: 0.0,
+        scroll_horizontal: false,
+        scroll_request: 0,
+        scroll_event: None,
+        keycapture: None,
+        window_keyrelease: None,
+        capture_keys: Vec::new(),
+        keyrelease: None,
         focus_request: 0,
+        tab_stop: true,
         focus: None,
         blur: None,
         motion_request: 0,
@@ -427,6 +507,11 @@ fn dialog_content_tree(content: DialogContentComponentNode) -> crate::ElementNod
         motion_from_opacity: 1.0,
         motion_from_x: 0.0,
         motion_from_y: 0.0,
+        motion_to_opacity: 1.0,
+        motion_to_x: 0.0,
+        motion_to_y: 0.0,
+        motion_repeat: false,
+        motion_alternate: false,
         window_control: None,
     })
 }

@@ -5,6 +5,7 @@ enum ComponentKind {
     TextSurface,
     DropTarget,
     Split,
+    PanZoom,
     Popover,
     Dialog,
     DropdownMenu,
@@ -24,6 +25,7 @@ enum StatefulComponent {
     TextSurface(ComponentTextSurface),
     DropTarget(ComponentDropTarget),
     Split(ComponentSplit),
+    PanZoom(ComponentPanZoom),
     Popover(ComponentPopover),
     Dialog(ComponentDialog),
     DropdownMenu(ComponentDropdownMenu),
@@ -91,6 +93,23 @@ impl ComponentRegistry {
         let key = ComponentKey::new(ComponentKind::Split, id);
         self.active.insert(key.clone());
         self.entries.insert(key, StatefulComponent::Split(component)).is_none()
+    }
+    pub(crate) fn pan_zoom_mut(&mut self, id: &str) -> Option<&mut ComponentPanZoom> {
+        let key = ComponentKey::new(ComponentKind::PanZoom, id);
+        self.active.insert(key.clone());
+        match self.entries.get_mut(&key) {
+            Some(StatefulComponent::PanZoom(component)) => Some(component),
+            _ => None,
+        }
+    }
+    pub(crate) fn insert_pan_zoom(
+        &mut self,
+        id: &str,
+        component: ComponentPanZoom,
+    ) -> bool {
+        let key = ComponentKey::new(ComponentKind::PanZoom, id);
+        self.active.insert(key.clone());
+        self.entries.insert(key, StatefulComponent::PanZoom(component)).is_none()
     }
     pub(crate) fn popover_mut(&mut self, id: &str) -> Option<&mut ComponentPopover> {
         let key = ComponentKey::new(ComponentKind::Popover, id);

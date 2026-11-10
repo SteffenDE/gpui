@@ -28,6 +28,11 @@ defmodule GPUI.Test.Display do
   end
 
   @impl GPUI.Display
+  def set_theme(display, mode), do: Agent.update(display, &Map.put(&1, :theme, mode))
+
+  def theme(display), do: Agent.get(display, &Map.get(&1, :theme))
+
+  @impl GPUI.Display
   def sync(display, snapshot) do
     Agent.update(display, fn state ->
       if state.owner, do: send(state.owner, {:gpui_snapshot, snapshot})

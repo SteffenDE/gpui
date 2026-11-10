@@ -4,6 +4,11 @@ defmodule GPUI.Display.Native do
 
   A display owns one native runtime namespace while sharing the process-global
   GPUI application loop with other native displays.
+
+  The `:fonts` option accepts up to 64 OpenType/TrueType binaries (at most 32 MiB
+  each). Fonts are registered in the process-wide text system before the first
+  window opens; use the font's family name in `:font_family` styles. Application
+  code is responsible for reading its bundled font assets.
   """
 
   use GenServer
@@ -72,18 +77,25 @@ defmodule GPUI.Display.Native do
   end
 
   @doc "Changes the process-global native component theme and refreshes every window."
-  @spec set_theme(GenServer.server(), :light | :dark) :: :ok | {:error, term()}
-  def set_theme(display, mode) when mode in [:light, :dark],
+  @spec set_theme(GenServer.server(), :system | :light | :dark) :: :ok | {:error, term()}
+  @impl GPUI.Display
+  def set_theme(display, mode) when mode in [:system, :light, :dark],
     do: GenServer.call(display, {:set_theme, mode})
+
+  @impl GPUI.Display
+  def activate_window(display, window_id),
+    do: GenServer.call(display, {:activate_window, window_id})
 
   @impl GenServer
   def init(opts) do
     identity = Keyword.get(opts, :application_identity)
+    fonts = Keyword.get(opts, :fonts, [])
 
-    with :ok <- native_compiled(),
+    with :ok <- validate_fonts(fonts),
+         :ok <- native_compiled(),
          :ok <- initialize_identity(identity),
          {:ok, runtime} <- GPUI.Native.Backend.start_runtime(),
-         :ok <- initialize_theme(runtime, Keyword.get(opts, :theme)) do
+         :ok <- initialize_presentation(runtime, fonts, Keyword.get(opts, :theme)) do
       {:ok, %{runtime: runtime, windows: %{}, resources: %{}}}
     else
       {:error, reason} -> {:stop, reason}
@@ -147,6 +159,17 @@ defmodule GPUI.Display.Native do
     {:noreply, state}
   end
 
+  def handle_call({:activate_window, window_id}, _from, state) do
+    reply =
+      case GPUI.Native.Backend.activate_window(state.runtime, window_id) do
+        {:ok, :ok} -> :ok
+        {:error, "unknown_window"} -> {:error, :window_not_found}
+        {:error, reason} -> {:error, reason}
+      end
+
+    {:reply, reply, state}
+  end
+
   def handle_call({:set_theme, mode}, _from, state) do
     reply =
       case GPUI.Native.Backend.set_theme(state.runtime, mode) do
@@ -192,9 +215,41 @@ defmodule GPUI.Display.Native do
     end
   end
 
+  defp validate_fonts(fonts) when is_list(fonts) and length(fonts) <= 64 do
+    if Enum.all?(fonts, &(is_binary(&1) and byte_size(&1) in 1..33_554_432)),
+      do: :ok,
+      else: {:error, :invalid_fonts}
+  end
+
+  defp validate_fonts(_fonts), do: {:error, :invalid_fonts}
+
+  defp initialize_presentation(runtime, fonts, theme) do
+    with :ok <- initialize_fonts(runtime, fonts),
+         :ok <- initialize_theme(runtime, theme) do
+      :ok
+    else
+      {:error, _reason} = error ->
+        GPUI.Native.Backend.stop_runtime(runtime)
+        error
+    end
+  end
+
+  # Font bytes are loaded before any window is synchronized. Paths remain local
+  # to the Elixir application; native hosts receive portable OpenType data.
+  defp initialize_fonts(runtime, fonts) when is_list(fonts) do
+    Enum.reduce_while(fonts, :ok, fn bytes, :ok ->
+      case GPUI.Native.Backend.load_font(runtime, bytes) do
+        {:ok, :ok} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, {:font_load_failed, reason}}}
+      end
+    end)
+  end
+
+  defp initialize_fonts(_runtime, _fonts), do: {:error, :invalid_fonts}
+
   defp initialize_theme(_runtime, nil), do: :ok
 
-  defp initialize_theme(runtime, mode) when mode in [:light, :dark] do
+  defp initialize_theme(runtime, mode) when mode in [:system, :light, :dark] do
     case GPUI.Native.Backend.set_theme(runtime, mode) do
       {:ok, ^mode} -> :ok
       {:error, reason} -> {:error, reason}
@@ -291,7 +346,18 @@ defmodule GPUI.Display.Native do
   end
 
   defp window_open_config(window) do
-    Map.take(window, [:title, :size, :min_size, :resizable, :chrome, :lifecycle, :commands])
+    Map.take(window, [
+      :title,
+      :size,
+      :min_size,
+      :restore_bounds,
+      :center_in_work_area,
+      :cascade_offset,
+      :resizable,
+      :chrome,
+      :lifecycle,
+      :commands
+    ])
   end
 
   defp update_or_reopen_window(runtime, %{id: id} = window) do

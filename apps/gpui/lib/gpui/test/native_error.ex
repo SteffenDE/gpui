@@ -6,6 +6,7 @@ defmodule GPUI.Test.NativeError do
   @impl Exception
   def message(%__MODULE__{} = error) do
     subject = if is_nil(error.subject), do: "", else: " for #{inspect(error.subject)}"
-    "GPUI native test #{error.operation} failed#{subject}: #{error.reason}"
+    reason = if is_binary(error.reason), do: error.reason, else: inspect(error.reason)
+    "GPUI native test #{error.operation} failed#{subject}: #{reason}"
   end
 end

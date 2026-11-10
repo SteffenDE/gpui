@@ -82,7 +82,7 @@ pub(crate) fn render_progress(
 #[cfg(feature = "components")]
 pub(crate) fn start_file_read(
     event: String,
-    prompt: String,
+    (prompt, multiple): (String, bool),
     max_bytes: usize,
     runtime: crate::SharedRuntime,
     window_id: u64,
@@ -91,38 +91,48 @@ pub(crate) fn start_file_read(
 ) {
     use gpui::AppContext;
 
-    let operation_id = NEXT_FILE_OPERATION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
         files: true,
         directories: false,
-        multiple: false,
+        multiple,
         prompt: Some(prompt.into()),
     });
 
     window
         .spawn(cx, async move |cx| {
-            let result = match receiver.await {
-                Ok(Ok(Some(paths))) => match paths.into_iter().next() {
-                    Some(path) => {
-                        cx.background_spawn(async move { read_file(path, max_bytes) })
-                            .await
-                    }
-                    None => FileDialogResult::Cancelled,
-                },
-                Ok(Ok(None)) => FileDialogResult::Cancelled,
-                Ok(Err(error)) => FileDialogResult::Error(error.to_string()),
-                Err(error) => FileDialogResult::Error(error.to_string()),
+            let paths = match receiver.await {
+                Ok(Ok(Some(paths))) if !paths.is_empty() => Ok(paths),
+                Ok(Ok(_)) => Err(FileDialogResult::Cancelled),
+                Ok(Err(error)) => Err(FileDialogResult::Error(error.to_string())),
+                Err(error) => Err(FileDialogResult::Error(error.to_string())),
             };
-
-            let _ = crate::push_event(
-                &runtime,
-                crate::NativeEvent::FileDialog {
-                    window_id,
-                    event,
-                    operation_id,
-                    result,
-                },
-            );
+            let emit = |result| {
+                let operation_id =
+                    NEXT_FILE_OPERATION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _ = crate::push_event(
+                    &runtime,
+                    crate::NativeEvent::FileDialog {
+                        window_id,
+                        event: event.clone(),
+                        operation_id,
+                        result,
+                    },
+                );
+            };
+            match paths {
+                Ok(paths) => {
+                    for path in paths
+                        .into_iter()
+                        .take(if multiple { usize::MAX } else { 1 })
+                    {
+                        let result = cx
+                            .background_spawn(async move { read_file(path, max_bytes) })
+                            .await;
+                        emit(result);
+                    }
+                }
+                Err(result) => emit(result),
+            }
         })
         .detach();
 }

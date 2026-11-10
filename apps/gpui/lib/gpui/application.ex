@@ -28,6 +28,11 @@ defmodule GPUI.Application do
           min_size: 2,
           resizable: 1,
           chrome: 1,
+          appearance_events: 1,
+          geometry_events: 1,
+          center_in_work_area: 1,
+          restore_bounds: 1,
+          cascade_offset: 1,
           root: 1,
           root: 2,
           shortcut: 2
@@ -79,6 +84,21 @@ defmodule GPUI.Application do
         {:chrome, chrome}, spec ->
           %{spec | chrome: chrome}
 
+        {:center_in_work_area, enabled}, spec ->
+          %{spec | center_in_work_area: enabled}
+
+        {:geometry_events, enabled}, spec ->
+          %{spec | geometry_events: enabled}
+
+        {:restore_bounds, bounds}, spec ->
+          %{spec | restore_bounds: bounds}
+
+        {:cascade_offset, offset}, spec ->
+          %{spec | cascade_offset: offset}
+
+        {:appearance_events, enabled}, spec ->
+          %{spec | appearance_events: enabled}
+
         {:root, module, assigns}, spec ->
           %{spec | root: {module, Map.new(assigns)}}
 
@@ -96,6 +116,21 @@ defmodule GPUI.Application do
 
   @doc "Declares whether the native window can be resized by the user."
   defmacro resizable(value), do: quote(do: {:resizable, unquote(value)})
+
+  @doc "Opts in to initial and changed appearance callbacks on the root view."
+  defmacro appearance_events(value), do: quote(do: {:appearance_events, unquote(value)})
+
+  @doc "Centers inside the visible display work area when restoration does not supply a frame."
+  defmacro center_in_work_area(value), do: quote(do: {:center_in_work_area, unquote(value)})
+
+  @doc "Opts in to initial and changed normal window geometry callbacks."
+  defmacro geometry_events(value), do: quote(do: {:geometry_events, unquote(value)})
+
+  @doc "Restores logical screen bounds if they still fit a connected display work area."
+  defmacro restore_bounds(value), do: quote(do: {:restore_bounds, unquote(value)})
+
+  @doc "Offsets restored bounds, wrapping at the display work area edge."
+  defmacro cascade_offset(value), do: quote(do: {:cascade_offset, unquote(value)})
 
   @doc "Declares whether the window uses system or application-rendered content chrome."
   defmacro chrome(value), do: quote(do: {:chrome, unquote(value)})

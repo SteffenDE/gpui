@@ -99,3 +99,8 @@ use window::*;
 use window_codec::*;
 
 rustler::init!("Elixir.GPUI.Native.NIF");
+
+#[cfg(feature = "real-gpui")]
+mod decode;
+#[cfg(feature = "real-gpui")]
+use decode::decode_tree;

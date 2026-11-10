@@ -109,6 +109,7 @@ defmodule GPUI.UI.DataViewsTest do
     bold =
       RichRun.new(
         Range.new(Position.new(0, 0), Position.new(0, 5)),
+        font_family: "Run Mono",
         font_weight: :bold,
         color: 0xF8FAFC
       )
@@ -136,7 +137,7 @@ defmodule GPUI.UI.DataViewsTest do
 
     assert %{
              runs: [
-               %{font_weight: "bold", font_style: nil},
+               %{font_family: "Run Mono", font_weight: "bold", font_style: nil},
                %{font_weight: nil, underline_style: nil}
              ]
            } =
@@ -200,6 +201,27 @@ defmodule GPUI.UI.DataViewsTest do
         ]
       })
     end
+  end
+
+  test "rich text supports hover-only spans without link activation" do
+    run =
+      GPUI.Text.RichRun.new(
+        GPUI.Text.Range.new(GPUI.Text.Position.new(0, 0), GPUI.Text.Position.new(0, 4)),
+        link: "folder"
+      )
+
+    assert %GPUI.Element{type: :ui_rich_text, attrs: attrs} =
+             GPUI.UI.rich_text(%{
+               id: "hover-only",
+               label: "Hover spans",
+               text: "open",
+               runs: [run],
+               selectable: false,
+               "phx-link-hover": "span-hover"
+             })
+
+    assert attrs[:"phx-link"] == nil
+    assert attrs[:"phx-link-hover"] == "span-hover"
   end
 
   test "builds source-backed data tables with stable columns and rows" do
@@ -314,6 +336,18 @@ defmodule GPUI.UI.DataViewsTest do
     assert attrs[:total_count] == 10_000
     assert attrs[:selected_index] == 1
     assert attrs[:overscan] == 8
+    assert attrs[:toggle_on_click] == false
+
+    assert %Element{attrs: click_attrs} =
+             UI.tree(%{
+               id: "single-click",
+               label: "Single click tree",
+               toggle_on_click: true,
+               "phx-change": "selected",
+               "phx-toggle": "toggled"
+             })
+
+    assert click_attrs[:toggle_on_click] == true
 
     assert %Element{attrs: root_attrs} = UI.tree_item(%{id: "root", parent_id: nil})
     assert root_attrs[:parent_id] == nil
@@ -491,5 +525,74 @@ defmodule GPUI.UI.DataViewsTest do
         children: [%Element{type: :div}]
       })
     end
+  end
+
+  test "horizontal rich-text bindings validate the source and normalize scroll callbacks" do
+    base = %{id: "horizontal", label: "Code", text: "one line", runs: [], scroll_group: "file"}
+    element = UI.rich_text(Map.put(base, "phx-scroll", "moved"))
+    assert element.attrs[:"phx-scroll"] == "moved"
+    assert element.attrs[:tab_size] == 2
+
+    hit =
+      UI.rich_text(
+        Map.merge(base, %{
+          hit_test_x: 14,
+          hit_test_y: 8,
+          hit_test_request: 1,
+          "phx-hit-test": "caret"
+        })
+      )
+
+    assert hit.attrs[:hit_test_request] == 1
+
+    for options <- [%{hit_test_request: 1}, %{hit_test_x: 2, hit_test_y: 3, hit_test_request: 1}] do
+      assert_raise ArgumentError, fn -> UI.rich_text(Map.merge(base, options)) end
+    end
+
+    for invalid <- [0, 33] do
+      assert_raise ArgumentError, ~r/tab_size/, fn ->
+        UI.rich_text(Map.put(base, :tab_size, invalid))
+      end
+    end
+
+    multiline = UI.rich_text(%{base | text: "one\ntwo"})
+    assert multiline.attrs[:text] == "one\ntwo"
+    assert multiline.attrs[:scrollbar_placement] == "overlay"
+    assert multiline.attrs[:scroll_padding] == 8.0
+
+    assert_raise ArgumentError, ~r/single-line/, fn ->
+      UI.rich_text(Map.merge(base, %{text: "one\ntwo", reveal_start: 0, reveal_end: 3}))
+    end
+
+    for padding <- [-1, 1_000_001] do
+      assert_raise ArgumentError, ~r/scroll_padding/, fn ->
+        UI.rich_text(Map.put(base, :scroll_padding, padding))
+      end
+    end
+
+    assert_raise ArgumentError, ~r/requires scroll_group/, fn ->
+      UI.rich_text(base |> Map.delete(:scroll_group) |> Map.put(:scrollbar, true))
+    end
+
+    assert_raise ArgumentError, ~r/empty scrollbar row/, fn ->
+      UI.rich_text(Map.merge(base, %{scrollbar: true, scrollbar_gutter: 40}))
+    end
+
+    assert_raise ArgumentError, ~r/scrollbar_gutter/, fn ->
+      UI.rich_text(Map.merge(base, %{text: "", scrollbar: true, scrollbar_gutter: -1}))
+    end
+
+    bar =
+      UI.rich_text(
+        Map.merge(base, %{
+          text: "",
+          scrollbar: true,
+          scrollbar_gutter: 40,
+          scrollbar_visible: false
+        })
+      )
+
+    assert bar.attrs[:scrollbar_gutter] == 40
+    refute bar.attrs[:scrollbar_visible]
   end
 end

@@ -321,7 +321,13 @@ defmodule GPUI.Session do
          %{type: type, window_id: window_id} = native_event,
          state
        )
-       when type in [:window_close_request, :window_focus, :window_blur] do
+       when type in [
+              :window_close_request,
+              :window_focus,
+              :window_blur,
+              :window_appearance,
+              :window_geometry
+            ] do
     case Enum.find(state.windows, &(&1.id == window_id)) do
       %WindowSpec{root: {module, assigns}} = window ->
         assigns = Map.new(assigns)
@@ -330,7 +336,8 @@ defmodule GPUI.Session do
         result =
           if function_exported?(module, :handle_window_event, 3),
             do: module.handle_window_event(lifecycle, native_event, assigns),
-            else: {:close, assigns}
+            else:
+              if(lifecycle == :close_request, do: {:close, assigns}, else: {:noreply, assigns})
 
         handle_window_result(result, native_event, state, window, module, lifecycle)
 
@@ -367,6 +374,8 @@ defmodule GPUI.Session do
   defp lifecycle_name(:window_close_request), do: :close_request
   defp lifecycle_name(:window_focus), do: :focus
   defp lifecycle_name(:window_blur), do: :blur
+  defp lifecycle_name(:window_geometry), do: :geometry
+  defp lifecycle_name(:window_appearance), do: :appearance
 
   defp handle_window_result(
          {:noreply, assigns},

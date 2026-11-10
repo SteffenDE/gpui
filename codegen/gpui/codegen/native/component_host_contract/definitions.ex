@@ -47,6 +47,7 @@ defmodule GPUI.Codegen.Native.ComponentHostContract.Definitions do
   defp payload_type(:none), do: :ComponentEventEnvelope
   defp payload_type(:value), do: :ComponentValueEvent
   defp payload_type(:input), do: :ComponentInputEvent
+  defp payload_type(:keystroke), do: :ComponentKeystrokeEvent
   defp payload_type(:transfer), do: :ComponentTransferEvent
   defp payload_type(:file_dialog), do: :ComponentFileDialogEvent
   defp payload_type(:text_geometry), do: :ComponentTextGeometryEvent

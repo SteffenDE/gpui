@@ -27,6 +27,16 @@ enum TestCommand {
         element_id: &'static str,
         reply: TestCommandReply<()>,
     },
+    DoubleClick {
+        element_id: &'static str,
+        reply: TestCommandReply<()>,
+    },
+    Pinch {
+        element_id: &'static str,
+        delta: f32,
+        phase: gpui::TouchPhase,
+        reply: TestCommandReply<()>,
+    },
     ClickAt {
         x: f32,
         y: f32,
@@ -159,10 +169,10 @@ fn selector(
 
 #[cfg(feature = "native-test")]
 fn initialize(width: f32, height: f32) -> TestSession {
-    use gpui::IntoElement as _;
-
     let mut app = gpui::TestAppContext::single();
     app.update(gpui_component::init);
+    app.update(bind_input_keys);
+    app.update(crate::window::bind_dialog_content_keys);
     app.update(crate::element::component::terminal::bind_terminal_keys);
     let runtime = Arc::new(crate::runtime::RuntimeState::new());
     let state = Arc::new(crate::WindowState::new(
@@ -183,11 +193,12 @@ fn initialize(width: f32, height: f32) -> TestSession {
         .borrow_mut()
         .take()
         .expect("native test window should install the Elixir view");
-    context.draw(
-        gpui::Point::default(),
-        gpui::size(gpui::px(width), gpui::px(height)),
-        |_window, _cx| root.clone().into_any_element(),
-    );
+    context.simulate_resize(gpui::size(gpui::px(width), gpui::px(height)));
+    context.update(|window, cx| {
+        window.activate_window();
+        window.bounds_changed(cx);
+    });
+    context.update(|window, cx| window.draw(cx).clear(cx));
 
     TestSession {
         runtime,
@@ -199,15 +210,15 @@ fn initialize(width: f32, height: f32) -> TestSession {
 
 #[cfg(feature = "native-test")]
 fn draw_root(session: &mut TestSession) {
-    use gpui::IntoElement as _;
-
-    let root = session.root.clone();
-    let viewport_size = session.context.update(|window, _cx| window.viewport_size());
+    // Use the window's complete render pipeline. VisualTestContext::draw only
+    // paints a standalone element; clearing that temporary arena leaves popup
+    // deferred draws dangling when the window subsequently paints them.
+    session
+        .root
+        .update(&mut session.context.cx, |_, cx| cx.notify());
     session
         .context
-        .draw(gpui::Point::default(), viewport_size, |_window, _cx| {
-            root.into_any_element()
-        });
+        .update(|window, cx| window.draw(cx).clear(cx));
 }
 
 #[cfg(feature = "native-test")]
@@ -227,6 +238,8 @@ pub(crate) fn start(width: f32, height: f32) -> Result<NativeTestSessionResource
 
     std::thread::Builder::new()
         .name("gpui-native-test".to_string())
+        // Rendering accepted nested trees needs the same stack budget as decoding.
+        .stack_size(8 * 1024 * 1024)
         .spawn(move || {
             let ready_after_panic = ready.clone();
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -355,6 +368,45 @@ fn handle_non_stop_command(session: &mut TestSession, command: TestCommand) {
             session.context.run_until_parked();
             let _ = reply.send(Ok(()));
         }
+        TestCommand::DoubleClick { element_id, reply } => {
+            let result = target_bounds(&mut session.context, element_id).map(|bounds| {
+                session.context.simulate_mouse_move(
+                    bounds.center(),
+                    None,
+                    gpui::Modifiers::default(),
+                );
+                session.context.simulate_event(gpui::MouseDownEvent {
+                    position: bounds.center(),
+                    button: gpui::MouseButton::Left,
+                    click_count: 2,
+                    ..Default::default()
+                });
+                session.context.simulate_mouse_up(
+                    bounds.center(),
+                    gpui::MouseButton::Left,
+                    gpui::Modifiers::default(),
+                );
+                session.context.run_until_parked();
+            });
+            let _ = reply.send(result);
+        }
+        TestCommand::Pinch {
+            element_id,
+            delta,
+            phase,
+            reply,
+        } => {
+            let result = target_bounds(&mut session.context, element_id).map(|bounds| {
+                session.context.simulate_event(gpui::PinchEvent {
+                    position: bounds.center(),
+                    delta,
+                    phase,
+                    modifiers: gpui::Modifiers::default(),
+                });
+                session.context.run_until_parked();
+            });
+            let _ = reply.send(result);
+        }
         TestCommand::Scroll {
             element_id,
             delta_x,
@@ -387,6 +439,11 @@ fn handle_non_stop_command(session: &mut TestSession, command: TestCommand) {
             session
                 .context
                 .simulate_resize(gpui::size(gpui::px(width), gpui::px(height)));
+            // TestPlatformWindow changes its size without the production bounds
+            // callback. Refresh viewport state and notify layout observers too.
+            session
+                .context
+                .update(|window, cx| window.bounds_changed(cx));
             session.context.run_until_parked();
             let _ = reply.send(Ok(()));
         }
@@ -414,11 +471,30 @@ fn handle_non_stop_command(session: &mut TestSession, command: TestCommand) {
                 .cx
                 .executor()
                 .advance_clock(std::time::Duration::from_millis(milliseconds));
+            // The test platform has no display frame loop. Deliver scheduled
+            // frame callbacks explicitly when advancing deterministic time.
+            session.context.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
             session.context.run_until_parked();
+            draw_root(session);
             let _ = reply.send(Ok(()));
         }
         TestCommand::Key { key, reply } => {
-            session.context.simulate_keystrokes(&key);
+            for stroke in key.split_whitespace() {
+                let Ok(keystroke) = gpui::Keystroke::parse(stroke) else {
+                    let _ = reply.send(Err("invalid_native_test_key".into()));
+                    return;
+                };
+                session.context.simulate_keystrokes(stroke);
+                session.context.update(|window, cx| {
+                    window.dispatch_event(
+                        gpui::PlatformInput::KeyUp(gpui::KeyUpEvent { keystroke }),
+                        cx,
+                    );
+                });
+            }
+            session.context.run_until_parked();
             let _ = reply.send(Ok(()));
         }
         TestCommand::Events { reply } => {
@@ -461,6 +537,39 @@ pub(crate) fn click(
 ) -> Result<(), String> {
     let element_id = selector(session, element_id)?;
     execute(session, |reply| TestCommand::Click { element_id, reply })
+}
+#[cfg(feature = "native-test")]
+pub(crate) fn double_click(
+    session: &rustler::ResourceArc<NativeTestSessionResource>,
+    element_id: String,
+) -> Result<(), String> {
+    let element_id = selector(session, element_id)?;
+    execute(session, |reply| TestCommand::DoubleClick {
+        element_id,
+        reply,
+    })
+}
+#[cfg(feature = "native-test")]
+pub(crate) fn pinch(
+    session: &rustler::ResourceArc<NativeTestSessionResource>,
+    element_id: String,
+    delta: f32,
+    phase: String,
+) -> Result<(), String> {
+    let element_id = selector(session, element_id)?;
+    let phase = match phase.as_str() {
+        "started" => gpui::TouchPhase::Started,
+        "moved" => gpui::TouchPhase::Moved,
+        "ended" => gpui::TouchPhase::Ended,
+        "cancelled" => gpui::TouchPhase::Cancelled,
+        _ => return Err("invalid pinch phase".into()),
+    };
+    execute(session, |reply| TestCommand::Pinch {
+        element_id,
+        delta,
+        phase,
+        reply,
+    })
 }
 #[cfg(feature = "native-test")]
 pub(crate) fn click_at(
@@ -572,4 +681,110 @@ pub(crate) fn stop(
     receiver
         .recv_timeout(COMMAND_TIMEOUT)
         .map_err(|_| "native_test_worker_stopped".to_string())?
+}
+
+#[cfg(all(test, feature = "native-test"))]
+mod viewport_tests {
+    use super::*;
+
+    #[test]
+    fn relative_dialog_tracks_actual_viewport_resize() {
+        let mut session = initialize(360.0, 220.0);
+        // Geometry assertions use the accessibility preference to remove the
+        // component library's wall-clock slide animation from this test.
+        session.context.update(|_, cx| cx.set_reduce_motion(true));
+        let marker = crate::ElementNode::Div(crate::ContainerNode {
+            tag: crate::GeneratedElementTag::Div,
+            style: crate::StyleAttrs {
+                height: Some(gpui::px(20.0).into()),
+                ..Default::default()
+            },
+            id: Some("dialog-marker".into()),
+            accessibility: Default::default(),
+            children: vec![],
+            pointer: None,
+            pointer_position: None,
+            pointer_down: None,
+            window_pointer_position: None,
+            window_pointer_up: None,
+            clipboard_write: None,
+            clipboard_text: None,
+            clipboard_write_request: 0,
+            clipboard_without_primary: false,
+            click: None,
+            bounds_change: None,
+            scrollbar: false,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            scroll_horizontal: false,
+            scroll_request: 0,
+            scroll_event: None,
+            keycapture: None,
+            window_keyrelease: None,
+            capture_keys: Vec::new(),
+            keyrelease: None,
+            focus_request: 0,
+            tab_stop: true,
+            focus: None,
+            blur: None,
+            motion_request: 0,
+            motion_duration: 0,
+            motion_delay: 0,
+            motion_easing: "linear".into(),
+            motion_policy: "never".into(),
+            motion_from_opacity: 1.0,
+            motion_from_x: 0.0,
+            motion_from_y: 0.0,
+            motion_to_opacity: 1.0,
+            motion_to_x: 0.0,
+            motion_to_y: 0.0,
+            motion_repeat: false,
+            motion_alternate: false,
+            window_control: None,
+        });
+        let tree = crate::ElementNode::DialogComponent(crate::DialogComponentNode {
+            id: "relative-dialog".into(),
+            style: Default::default(),
+            open: true,
+            title: "Search".into(),
+            show_title: false,
+            fullscreen: false,
+            width: 280.0,
+            margin_top: None,
+            margin_top_ratio: Some(0.2),
+            overlay: true,
+            closable: true,
+            pointer_dismiss: true,
+            keyboard: true,
+            close_button: false,
+            change: None,
+            children: vec![crate::ElementNode::DialogContentComponent(
+                crate::DialogContentComponentNode {
+                    style: Default::default(),
+                    children: vec![marker],
+                },
+            )],
+        });
+        session.view.update(&mut session.context.cx, |view, cx| {
+            *view.window_state.tree.lock().unwrap() = tree;
+            cx.notify();
+        });
+        session.context.run_until_parked();
+        draw_root(&mut session);
+        session.context.run_until_parked();
+        draw_root(&mut session);
+        let initial = target_bounds(&mut session.context, "dialog-marker").unwrap();
+        let (reply, _receiver) = std::sync::mpsc::sync_channel(1);
+        handle_non_stop_command(
+            &mut session,
+            TestCommand::Resize {
+                width: 360.0,
+                height: 420.0,
+                reply,
+            },
+        );
+        draw_root(&mut session);
+        let resized = target_bounds(&mut session.context, "dialog-marker").unwrap();
+        assert_eq!(resized.origin.y - initial.origin.y, gpui::px(40.0));
+    }
 }

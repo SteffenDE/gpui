@@ -10,6 +10,10 @@ defmodule GPUI.Components.NativeContract do
 
   @event_payloads %{
     change: :value,
+    inserted: :value,
+    selection_change: :value,
+    navigation_change: :value,
+    open: :value,
     cell_change: :value,
     click: :none,
     clipboard: :transfer,
@@ -25,9 +29,13 @@ defmodule GPUI.Components.NativeContract do
     geometry: :text_geometry,
     hit_test: :text_position,
     keydown: :input,
+    keystroke: :keystroke,
     keyup: :input,
     link: :value,
+    link_hover: :value,
     range: :value,
+    scroll: :value,
+    measure: :value,
     release: :value,
     search: :value,
     select: :value,
@@ -44,6 +52,7 @@ defmodule GPUI.Components.NativeContract do
           :none
           | :value
           | :input
+          | :keystroke
           | :transfer
           | :file_dialog
           | :text_geometry

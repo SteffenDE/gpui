@@ -5,8 +5,53 @@ pub(crate) enum NativeEvent {
     #[cfg(feature = "components")]
     Copy { window_id: u64, event: String },
     Click { window_id: u64, event: String },
+    ModifiedClick {
+        window_id: u64,
+        event: String,
+        control: bool,
+        alt: bool,
+        shift: bool,
+        platform: bool,
+    },
+    PrimitiveClipboardWrite { window_id: u64, event: String },
+    #[cfg(feature = "real-gpui")]
+    PointerState {
+        window_id: u64,
+        event: String,
+        hovered: bool,
+        control: bool,
+        alt: bool,
+        shift: bool,
+        platform: bool,
+    },
+    #[cfg(feature = "components")]
+    LinkHover {
+        window_id: u64,
+        event: String,
+        value: ElementBoundsGeometry,
+        link: Option<String>,
+        hovered: bool,
+    },
     Command { window_id: u64, event: String },
     Input { kind: InputKind, window_id: u64, event: String, value: Option<EventValue> },
+    #[cfg(feature = "components")]
+    ModifiedInput {
+        kind: InputKind,
+        window_id: u64,
+        event: String,
+        value: Option<EventValue>,
+        control: bool,
+        alt: bool,
+        shift: bool,
+        platform: bool,
+    },
+    #[cfg(feature = "real-gpui")]
+    CapturedKeystroke {
+        window_id: u64,
+        event: String,
+        value: KeyStroke,
+        captured: bool,
+    },
     #[cfg(feature = "real-gpui")]
     Keystroke { window_id: u64, event: String, value: KeyStroke },
     #[cfg(feature = "real-gpui")]
@@ -60,6 +105,8 @@ pub(crate) enum NativeEvent {
     },
     WindowCloseRequest { window_id: u64 },
     WindowFocus { focused: bool, window_id: u64 },
+    WindowGeometry { window_id: u64, bounds: Vec<f64>, initial: bool },
+    WindowAppearance { window_id: u64, dark: bool },
     WindowClosed { window_id: u64 },
     #[cfg(feature = "real-gpui")]
     VirtualRange { window_id: u64, event: String, first: u64, last: u64 },
@@ -85,11 +132,84 @@ pub(crate) fn encode_native_event<'a>(
         NativeEvent::Click { window_id, event } => {
             encode_named_event(env, atoms::click(), window_id, event)
         }
+        NativeEvent::ModifiedClick {
+            window_id,
+            event,
+            control,
+            alt,
+            shift,
+            platform,
+        } => {
+            encode_modified_click_event(
+                env,
+                window_id,
+                event,
+                control,
+                alt,
+                shift,
+                platform,
+            )
+        }
+        NativeEvent::PrimitiveClipboardWrite { window_id, event } => {
+            encode_named_event(env, atoms::clipboard_write(), window_id, event)
+        }
+        #[cfg(feature = "real-gpui")]
+        NativeEvent::PointerState {
+            window_id,
+            event,
+            hovered,
+            control,
+            alt,
+            shift,
+            platform,
+        } => {
+            encode_pointer_state_event(
+                env,
+                window_id,
+                event,
+                hovered,
+                control,
+                alt,
+                shift,
+                platform,
+            )
+        }
+        #[cfg(feature = "components")]
+        NativeEvent::LinkHover { window_id, event, value, link, hovered } => {
+            encode_link_hover_event(env, window_id, event, value, link, hovered)
+        }
         NativeEvent::Command { window_id, event } => {
             encode_named_event(env, atoms::command(), window_id, event)
         }
         NativeEvent::Input { kind, window_id, event, value } => {
             encode_input_event(env, &kind, window_id, event, value)
+        }
+        #[cfg(feature = "components")]
+        NativeEvent::ModifiedInput {
+            kind,
+            window_id,
+            event,
+            value,
+            control,
+            alt,
+            shift,
+            platform,
+        } => {
+            encode_modified_input_event(
+                env,
+                &kind,
+                window_id,
+                event,
+                value,
+                control,
+                alt,
+                shift,
+                platform,
+            )
+        }
+        #[cfg(feature = "real-gpui")]
+        NativeEvent::CapturedKeystroke { window_id, event, value, captured } => {
+            encode_captured_keystroke_event(env, window_id, event, value, captured)
         }
         #[cfg(feature = "real-gpui")]
         NativeEvent::Keystroke { window_id, event, value } => {
@@ -194,6 +314,12 @@ pub(crate) fn encode_native_event<'a>(
                 if focused { atoms::window_focus() } else { atoms::window_blur() },
                 window_id,
             )
+        }
+        NativeEvent::WindowGeometry { window_id, bounds, initial } => {
+            encode_window_geometry(env, window_id, &bounds, initial)
+        }
+        NativeEvent::WindowAppearance { window_id, dark } => {
+            encode_window_appearance(env, window_id, dark)
         }
         NativeEvent::WindowClosed { window_id } => {
             encode_window_event(env, atoms::window_closed(), window_id)

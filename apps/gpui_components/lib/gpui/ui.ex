@@ -34,6 +34,7 @@ defmodule GPUI.UI do
 
   ComponentsSchema.define_component_option_types(
     button_options: :ui_button,
+    pan_zoom_options: :ui_pan_zoom,
     edge_fade_options: :ui_edge_fade,
     frost_options: :ui_frost,
     paint_options: :ui_paint,
@@ -87,13 +88,18 @@ defmodule GPUI.UI do
   @doc """
   Builds a native button.
 
+  Set `show_label: false` for icon-only child content; `label` still names the
+  button for assistive technology.
+
   `phx-clipboard-write` writes bounded `clipboard_text` to the display-side
   clipboard on activation. `phx-clipboard-read` reads bounded display-side text
   and emits it as `GPUI.Transfer.Payload`. When clipboard and click events are
   combined, the clipboard operation is performed first.
 
-  `phx-file-read` opens a display-side file picker, reads one bounded file, and
-  emits `file_read_value/0`. `file_max_bytes` defaults to 10 MiB and may not
+  `phx-file-read` opens a display-side file picker, reads bounded files, and
+  emits `file_read_value/0` once per file in selection order. Set `file_multiple`
+  to allow multiple selections (the default is false). Each event has a distinct
+  operation ID; a failed read does not prevent subsequent files from being read. `file_max_bytes` defaults to 10 MiB and may not
   exceed 25 MiB. Clipboard operations run before file reads, and file reads run
   before an ordinary click event.
 
@@ -253,6 +259,16 @@ defmodule GPUI.UI do
   @doc """
   Builds a persistent labeled controlled string input using `value` and required `phx-change`.
 
+  Increment `insert_request` with `insert_text` to replace the native selection
+  once, preserving the insertion cursor and reporting the resulting `phx-change`.
+  `insert_on_new_line: true` adds a newline before the text when the preceding
+  character is not already a newline. Set `insert_match` to replace the first
+  exact match instead of the selection; this keeps a cursor outside the match
+  anchored to its surrounding text. A missing or empty match leaves text unchanged.
+  `phx-inserted` optionally acknowledges every nonzero request with
+  `[request_as_string, resulting_text]`, after the change event, including no-ops.
+  Disabled inputs ignore insertion requests.
+
   `phx-submit` optionally receives Enter activation with the current value.
   Increment `focus_request` to request native focus after validation or another
   application-owned transition.
@@ -260,8 +276,15 @@ defmodule GPUI.UI do
   `appearance: false` removes the input's border, background and shadow.
   `multiline: true` creates a wrapping, auto-growing input bounded by `max_rows`
   (1 through 64). Enter submits; Shift+Enter inserts a newline without submitting.
-  Multiline mode and its row limit are construction options: use a new `id` when
-  changing them so native editing state is recreated.
+  Set `submit_on_enter: false` in multiline mode to insert a newline with Enter
+  and submit with Command+Enter on macOS or Control+Enter on other platforms.
+  Multiline mode, its row limit, and submission policy are construction options:
+  use a new `id` when changing them so native editing state is recreated.
+
+  `phx-keystroke` receives structured key events while the input is focused.
+  With this callback present, `capture_keys` consumes matching unmodified keys
+  before native editing and window shortcuts; for example `["escape"]` lets a
+  composer preserve its draft and move focus when Escape is pressed.
 
   #{ComponentsSchema.component_options_doc(:ui_input)}
   """
@@ -489,11 +512,38 @@ defmodule GPUI.UI do
   Source-backed slices are intentionally unsupported until unloaded variable
   heights have an explicit estimation contract.
 
+  `scrollbar: true` reserves a 10px native vertical scrollbar lane. The thumb
+  appears on overflow and supports dragging and page clicks. Its color follows
+  the collection foreground, at 20% opacity (35% while hovered or dragged).
+
+  `scrollbar_gutter: "auto"` reserves the 10px scrollbar lane only while content
+  overflows vertically. It updates after item measurement and viewport resizing,
+  including when no application events are attached. The default `"stable"`
+  keeps the lane reserved whenever `scrollbar: true`.
+
+  `measure_all: true` measures every item's layout on the first frame, useful
+  when items carry exact height placeholders. `phx-scroll` emits a change value
+  `[top_index, offset_in_item]` in logical pixels, including programmatic reveals.
+  Optional `phx-measure` emits `:bounds` events for measured viewport/overdraw
+  items. Values contain the logical item `id`, native `width` and `height`, and
+  window coordinates at measurement time. Unchanged sizes do not emit again;
+  this callback observes sizes rather than tracking scroll position.
+  With `reveal_strategy: "top"`, `reveal_offset` restores a pixel offset into
+  the target item instead of aligning its first pixel with the viewport. Negative
+  offsets position the item below the viewport top, rebasing through preceding
+  measured rows after layout. Use `measure_all: true` when this may cross rows
+  outside the measured region. Positions clamp at the beginning of the list.
+
   #{ComponentsSchema.component_options_doc(:ui_virtual_collection)}
   """
   @spec virtual_collection(virtual_collection_options()) :: Element.t()
   def virtual_collection(assigns) when is_map(assigns) do
-    assigns = normalize_attr_key(assigns, :"phx-range")
+    assigns =
+      assigns
+      |> normalize_attr_key(:"phx-range")
+      |> normalize_attr_key(:"phx-scroll")
+      |> normalize_attr_key(:"phx-measure")
+
     children = Map.get(assigns, :children, [])
     assigns = ComponentsSchema.apply_defaults(assigns, :ui_virtual_collection)
 
@@ -580,15 +630,86 @@ defmodule GPUI.UI do
   non-overlapping, non-empty, and within the supplied text. Unstyled gaps inherit
   the component's ordinary text style.
 
+  `tab_size` defaults to 2 and accepts integers from 1 to 32. Tabs advance to measured native tab stops rather
+  than becoming fixed strings of spaces. Styling, selection, copy, and UTF-16
+  reveal ranges retain their original source offsets and tab bytes.
+
   Native state owns transient selection and system copy. Link runs require
   `phx-link`; activation emits the run's opaque `link` value through the ordinary
   controlled event path. This component does not parse Markdown or HTML.
+
+  Optional `scroll_group` shares a native horizontal position across rich-text
+  rows or multiline blocks, including virtualized rows. Multiline extents use
+  the widest physical line, with tab expansion and shaping runs preserved. `scroll_pane` distinguishes panes
+  with independent extents: movement synchronizes their pixel position while
+  each pane clamps to its own limit. Increment `scroll_revision` when source or
+  shaping metrics change. Widths use the same native shaping runs as the text.
+  `scrollbar: true` adds an unscrolled, draggable overlay; an empty text row can
+  provide a common scrollbar for the other rows in its pane. The track is 6px
+  high with a 1px inset and 3px corners. `scrollbar_visible` controls its paint
+  and hit testing without changing layout. For a separate empty scrollbar row,
+  `scrollbar_gutter` spans a fixed leading gutter while retaining the code rows'
+  narrower viewport and scroll limits. An explicit foreground color styles the
+  thumb; otherwise it uses the theme foreground at 20% opacity. Optional
+  `phx-scroll` reports `[left, max_left, viewport_width, content_width]` in
+  logical pixels, only when these values change. Unlinked focused panes accept
+  unmodified Left/Right and Home/End unless an application command handles them.
+
+  `scrollbar_placement: "gutter"` reserves a 10px horizontal lane only while
+  content overflows. `"outside"` paints that lane below the element without
+  changing block height; its parent must allow visible overflow and sufficient
+  spacing. Both modes place padding inside the scrollable content and support
+  automatic multiline height. The default `"overlay"` behavior remains unchanged.
+  `scroll_padding` adds trailing
+  space to measured text extents (default 8px); use zero for exact content widths.
+
+  `line_height_snap: "none"` retains fractional line heights through measurement,
+  wrapping, painting, selection, and range geometry. The default `"device"`
+  rounds line heights to device pixels, matching GPUI's standard text controls.
+  Font shaping and native word wrapping are shared by both modes.
+
+  `reveal_start`/`reveal_end` optionally reveal a single-line UTF-16 range in a
+  `scroll_group`. Offscreen ranges are centered horizontally; fully visible
+  ranges retain the scroll position. Increment `reveal_request` to repeat the
+  same reveal after user scrolling. Ordinary rerenders do not repeat it.
+
+  `hit_test_x`/`hit_test_y` are window logical-pixel coordinates. A new positive
+  `hit_test_request` reports the nearest shaped caret as `[line, utf16_offset]`
+  through `phx-hit-test` after layout, without changing selection or focus.
+  Coordinates include native scrolling and wrapping. Reuse of the same request
+  does not emit again. Use a request-specific callback to correlate replies.
+
+  `geometry_ranges` requests UTF-16 ranges through `phx-range-geometry-change`.
+  Each result contains the range and its shaped, window-relative logical-pixel
+  rectangles, one per visual row. Results update after wrapping, scrolling, or
+  text changes; identical results are suppressed. Empty ranges have no rectangles.
+  Rich text has no editable buffer revision, so these events use revision zero.
+  Use a document-specific event name to correlate replies.
+
+  Spans with only `phx-link-hover` provide passive hover regions: without
+  `phx-link` they do not activate or add keyboard focus stops. With
+  `selectable: false`, pointer focus remains with the containing control.
+
+  Optional `phx-link-hover` reports a linked span on entry, exit, or geometry
+  changes. Its value contains `id`, `link`, `hovered`, and the window-relative
+  `x`, `y`, `width`, `height`, and `coordinate_space` fields. It preserves text
+  selection and link clicks; use the rectangle to anchor a hover preview.
+
+  Optional `phx-change` reports the selected text after pointer selection,
+  Select All, Escape, or an outside click. Empty text reports a cleared selection.
 
   #{ComponentsSchema.component_options_doc(:ui_rich_text)}
   """
   @spec rich_text(rich_text_options()) :: Element.t()
   def rich_text(assigns) when is_map(assigns) do
-    assigns = normalize_attr_key(assigns, :"phx-link")
+    assigns =
+      assigns
+      |> normalize_attr_key(:"phx-link")
+      |> normalize_attr_key(:"phx-link-hover")
+      |> normalize_attr_key(:"phx-scroll")
+      |> normalize_attr_key(:"phx-change")
+      |> normalize_attr_key(:"phx-range-geometry-change")
+
     assigns = ComponentsSchema.apply_defaults(assigns, :ui_rich_text)
     Validation.validate_rich_text!(assigns)
     component(:ui_rich_text, assigns)
@@ -660,6 +781,35 @@ defmodule GPUI.UI do
   `phx-change` receives selection and `phx-toggle` receives the stable ID whose
   expansion should change. Source-backed ranges follow the same exclusive
   `phx-range` contract as `virtual_list/1`.
+
+  Set `toggle_on_click: true` to select and toggle directories on a single
+  pointer click. Modified clicks select without toggling. The default retains
+  double-click toggling. Set `select_on_navigation: false` for roving keyboard
+  focus: arrows move focus and Enter/Space selects the focused item. The default
+  selects while navigating. Optional `phx-navigation-change` receives the stable
+  focused item ID when pointer clicks or keyboard navigation move the roving
+  focus, including moves that leave selection unchanged. Controlled `selected`
+  updates do not emit this event.
+
+  With `multiple: true`, `selected_items` controls the selected IDs and
+  `phx-selection-change` receives their ordered list. `selected` remains the
+  primary focus-following item. Plain arrows only move focus when
+  `select_on_navigation: false`; Shift-Up/Down extends or contracts selection,
+  Shift-click selects a visible range, Control/Command-click toggles membership,
+  Control/Command-Space toggles the focused item, and Control/Command-A selects
+  the visible selectable order. Primary-modifier clicks with `phx-open` retain
+  open behavior instead of changing the selection. Command-Enter opens too.
+
+  `selection_items` supplies the complete ordered selectable IDs for a virtual
+  tree, including unloaded rows and excluding disabled/collapsed rows. Omit it
+  to use the supplied enabled children. Hidden selected IDs can remain in
+  `selected_items`. `style={[selected_background: {:rgb, 0x212428}]}` customizes
+  selected-row fill; it otherwise follows the component theme's accent.
+
+  Optional `phx-open` receives a primary-modifier pointer click on an item,
+  including the item ID and modifiers, without changing selection or pointer
+  focus. Use it to open a file in another view. Without it, selection retains
+  its usual behavior. The consumer decides whether a directory can be opened.
 
   #{ComponentsSchema.component_options_doc(:ui_tree)}
   """
@@ -883,6 +1033,37 @@ defmodule GPUI.UI do
     validate_slider!(assigns)
     validate_non_empty_label!(:ui_slider, Map.get(assigns, :label))
     component(:ui_slider, assigns)
+  end
+
+  @doc """
+  Centers one resizable content element in a clipped pan/zoom viewport.
+
+  The child should fill its parent (for example, an image with full width/height).
+  Intrinsic content dimensions fit within 90% of the viewport without enlarging.
+  Ordinary wheels pan, Ctrl/Cmd-wheel and native pinch zoom around the pointer,
+  and a left drag moves the content after a four-pixel threshold. Double-click
+  zooms a centered initial view to 2x, or resets an already transformed view.
+  `phx-change` receives `[pan_x, pan_y, scale]`; optional `phx-click` reports an
+  unmoved click that began outside the content. `reset_request` explicitly
+  reapplies controlled coordinates, including while local changes are pending.
+
+  #{ComponentsSchema.component_options_doc(:ui_pan_zoom)}
+  """
+  @spec pan_zoom(pan_zoom_options()) :: Element.t()
+  def pan_zoom(assigns) when is_map(assigns) do
+    unless Map.has_key?(assigns, :content_width) and Map.has_key?(assigns, :content_height),
+      do: raise(ArgumentError, "ui_pan_zoom requires intrinsic content_width and content_height")
+
+    assigns = ComponentsSchema.apply_defaults(assigns, :ui_pan_zoom)
+    ComponentsSchema.validate_component_assigns!(assigns, :ui_pan_zoom)
+
+    unless length(Map.get(assigns, :children, [])) == 1,
+      do: raise(ArgumentError, "ui_pan_zoom requires exactly one content element")
+
+    unless assigns.min_scale <= assigns.scale and assigns.scale <= assigns.max_scale,
+      do: raise(ArgumentError, "ui_pan_zoom scale must be between min_scale and max_scale")
+
+    component(:ui_pan_zoom, assigns)
   end
 
   defp validate_split!(assigns) do

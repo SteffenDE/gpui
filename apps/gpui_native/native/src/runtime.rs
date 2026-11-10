@@ -18,6 +18,19 @@ use std::{
 type FocusBinding = (Option<String>, Option<String>);
 #[cfg(feature = "real-gpui")]
 type FocusBindingKey = (u64, String);
+#[cfg(feature = "real-gpui")]
+type NonmodalPopovers = HashMap<(u64, String), NonmodalPopover>;
+
+#[cfg(feature = "real-gpui")]
+pub(crate) struct NonmodalPopover {
+    pub(crate) open: std::sync::Weak<Mutex<bool>>,
+    #[cfg(feature = "components")]
+    pub(crate) order: u64,
+    #[cfg(feature = "components")]
+    pub(crate) parent: Option<String>,
+    #[cfg(feature = "components")]
+    pub(crate) hover: std::sync::Weak<Mutex<crate::component_registry::PopoverHoverState>>,
+}
 
 #[cfg(feature = "real-gpui")]
 static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(1);
@@ -35,18 +48,116 @@ pub(crate) struct RuntimeState {
     #[cfg(feature = "real-gpui")]
     pub(crate) focus_requests: Mutex<HashMap<(u64, String), u64>>,
     #[cfg(feature = "real-gpui")]
+    pub(crate) clipboard_requests: Mutex<HashMap<(u64, String), u64>>,
+    #[cfg(feature = "real-gpui")]
     pub(crate) focus_bindings: Mutex<HashMap<FocusBindingKey, FocusBinding>>,
     #[cfg(feature = "real-gpui")]
     pub(crate) focus_observers: Mutex<std::collections::HashSet<(u64, String)>>,
     #[cfg(feature = "real-gpui")]
     pub(crate) focus_handles: Mutex<HashMap<(u64, String), crate::gpui::FocusHandle>>,
     #[cfg(feature = "real-gpui")]
-    pub(crate) element_bounds: Mutex<HashMap<(u64, String), crate::event::ElementBoundsGeometry>>,
+    pub(crate) element_bounds: Mutex<crate::element::event::BoundsCache>,
+    #[cfg(feature = "real-gpui")]
+    pub(crate) nonmodal_popovers: Mutex<NonmodalPopovers>,
+    #[cfg(feature = "components")]
+    pub(crate) next_popover_order: AtomicU64,
+    #[cfg(feature = "real-gpui")]
+    pub(crate) consumed_overlay_escape: Mutex<std::collections::HashSet<u64>>,
 }
 
 pub(crate) type SharedRuntime = Arc<RuntimeState>;
 
 impl RuntimeState {
+    #[cfg(feature = "components")]
+    pub(crate) fn popover_owns_escape(&self, window_id: u64, id: &str) -> bool {
+        if self
+            .consumed_overlay_escape
+            .lock()
+            .is_ok_and(|windows| windows.contains(&window_id))
+        {
+            return false;
+        }
+        self.nonmodal_popovers.lock().is_ok_and(|popovers| {
+            popovers
+                .iter()
+                .filter(|((window, _), state)| {
+                    *window == window_id
+                        && state
+                            .open
+                            .upgrade()
+                            .is_some_and(|open| open.lock().is_ok_and(|value| *value))
+                })
+                .max_by_key(|(_, state)| state.order)
+                .is_some_and(|((_, name), _)| name == id)
+        })
+    }
+
+    #[cfg(feature = "components")]
+    pub(crate) fn inside_popover_descendant(
+        &self,
+        window_id: u64,
+        id: &str,
+        position: crate::gpui::Point<crate::gpui::Pixels>,
+    ) -> bool {
+        self.nonmodal_popovers.lock().is_ok_and(|popovers| {
+            popovers.iter().any(|((window, _), state)| {
+                if *window != window_id
+                    || !state
+                        .open
+                        .upgrade()
+                        .is_some_and(|open| open.lock().is_ok_and(|value| *value))
+                {
+                    return false;
+                }
+                let inside = state.hover.upgrade().is_some_and(|hover| {
+                    hover.lock().is_ok_and(|hover| {
+                        hover
+                            .content_bounds
+                            .is_some_and(|bounds| bounds.contains(&position))
+                    })
+                });
+                if !inside {
+                    return false;
+                }
+                let mut parent = state.parent.as_deref();
+                let mut visited = std::collections::HashSet::new();
+                while let Some(name) = parent {
+                    if name == id {
+                        return true;
+                    }
+                    if !visited.insert(name) {
+                        break;
+                    }
+                    parent = popovers
+                        .get(&(window_id, name.to_string()))
+                        .and_then(|state| state.parent.as_deref());
+                }
+                false
+            })
+        })
+    }
+
+    #[cfg(feature = "real-gpui")]
+    pub(crate) fn overlay_owns_escape(&self, window_id: u64) -> bool {
+        if self
+            .consumed_overlay_escape
+            .lock()
+            .is_ok_and(|windows| windows.contains(&window_id))
+        {
+            return true;
+        }
+        self.nonmodal_popovers.lock().is_ok_and(|mut popovers| {
+            popovers.retain(|_, state| state.open.strong_count() > 0);
+            popovers.iter().any(|((window, _), state)| {
+                *window == window_id
+                    && state
+                        .open
+                        .upgrade()
+                        .is_some_and(|open| open.lock().is_ok_and(|value| *value))
+            })
+        })
+    }
+
     pub(crate) fn new() -> Self {
         Self {
             events: Mutex::new(Vec::new()),
@@ -59,13 +170,21 @@ impl RuntimeState {
             #[cfg(feature = "real-gpui")]
             focus_requests: Mutex::new(HashMap::new()),
             #[cfg(feature = "real-gpui")]
+            clipboard_requests: Mutex::new(HashMap::new()),
+            #[cfg(feature = "real-gpui")]
             focus_bindings: Mutex::new(HashMap::new()),
             #[cfg(feature = "real-gpui")]
             focus_observers: Mutex::new(std::collections::HashSet::new()),
             #[cfg(feature = "real-gpui")]
             focus_handles: Mutex::new(HashMap::new()),
             #[cfg(feature = "real-gpui")]
-            element_bounds: Mutex::new(HashMap::new()),
+            element_bounds: Mutex::new(crate::element::event::BoundsCache::default()),
+            #[cfg(feature = "real-gpui")]
+            nonmodal_popovers: Mutex::new(HashMap::new()),
+            #[cfg(feature = "components")]
+            next_popover_order: AtomicU64::new(1),
+            #[cfg(feature = "real-gpui")]
+            consumed_overlay_escape: Mutex::new(std::collections::HashSet::new()),
         }
     }
 

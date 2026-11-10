@@ -12,12 +12,79 @@ pub(crate) struct ComponentVirtualCollection {
     item_keys: Vec<(String, u64)>,
     alignment: String,
     overdraw: f32,
+    measure_all: bool,
+    measure_event: Option<String>,
+    measured_sizes: std::collections::HashMap<String, (f64, f64)>,
     last_reveal_request: u64,
+    pending_reveal: Option<(usize, f64)>,
+    reveal_generation: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    reveal_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
     last_follow_request: u64,
     follow: String,
     range_event: Option<String>,
+    scroll_event: Option<String>,
     last_visible_range: std::sync::Arc<std::sync::Mutex<Option<std::ops::Range<usize>>>>,
     item_states: std::collections::HashMap<String, VirtualItemState>,
+    last_scroll: std::sync::Arc<std::sync::Mutex<Option<(usize, f32)>>>,
+    scrollbar: std::rc::Rc<std::cell::Cell<VerticalScrollbarState>>,
+}
+
+#[cfg(feature = "components")]
+#[derive(Clone)]
+struct ScrollMetrics {
+    root: gpui::WeakEntity<crate::ElixirRoot>,
+    collection: String,
+    event: String,
+    previous: std::sync::Arc<std::sync::Mutex<Option<(usize, f32)>>>,
+    reveal_pending: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[cfg(feature = "components")]
+impl ScrollMetrics {
+    fn emit(&self, state: &gpui::ListState, runtime: &crate::SharedRuntime, window_id: u64) {
+        if self
+            .reveal_pending
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return;
+        }
+        let top = state.logical_scroll_top();
+        let position = (top.item_ix, f32::from(top.offset_in_item));
+        let Ok(mut previous) = self.previous.lock() else {
+            return;
+        };
+        if *previous == Some(position) {
+            return;
+        }
+        *previous = Some(position);
+        let _ = crate::push_event(
+            runtime,
+            crate::NativeEvent::Input {
+                kind: crate::InputKind::Change,
+                window_id,
+                event: self.event.clone(),
+                value: Some(crate::EventValue::Numbers(vec![
+                    position.0 as f64,
+                    position.1 as f64,
+                ])),
+            },
+        );
+    }
+
+    fn schedule(&self, window: &mut gpui::Window, cx: &mut gpui::App) {
+        let metrics = self.clone();
+        window.defer(cx, move |_, cx| {
+            if let Some(root) = metrics.root.upgrade() {
+                root.update(cx, |root, _| {
+                    if let Some(collection) =
+                        root.components.virtual_collection_mut(&metrics.collection)
+                    {
+                        metrics.emit(&collection.list_state, &root.runtime, root.window_id);
+                    }
+                });
+            }
+        });
+    }
 }
 
 #[cfg(feature = "components")]
@@ -34,17 +101,64 @@ impl ComponentVirtualCollection {
         let alignment = alignment(node.alignment.as_deref());
         let overdraw = (node.overdraw as f32).clamp(0.0, 4096.0);
         let list_state = gpui::ListState::new(node.children.len(), alignment, gpui::px(overdraw));
+        let list_state = if node.measure_all {
+            list_state.measure_all()
+        } else {
+            list_state
+        };
         Self {
             list_state,
+            measure_all: node.measure_all,
+            measure_event: node.measure.clone(),
+            measured_sizes: Default::default(),
             item_keys: Vec::new(),
             alignment: node.alignment.clone().unwrap_or_else(|| "top".to_string()),
             overdraw,
             last_reveal_request: 0,
+            pending_reveal: None,
+            reveal_generation: Default::default(),
+            reveal_pending: Default::default(),
             last_follow_request: 0,
             follow: "none".to_string(),
             range_event: node.range.clone(),
+            scroll_event: node.scroll.clone(),
             last_visible_range: std::sync::Arc::new(std::sync::Mutex::new(None)),
             item_states: std::collections::HashMap::new(),
+            last_scroll: Default::default(),
+            scrollbar: Default::default(),
+        }
+    }
+
+    fn request_reveal(&mut self, node: &VirtualCollectionComponentNode) {
+        if node.reveal_request <= self.last_reveal_request {
+            return;
+        }
+        self.last_reveal_request = node.reveal_request;
+        self.reveal_generation
+            .store(node.reveal_request, std::sync::atomic::Ordering::Relaxed);
+        self.pending_reveal = None;
+        self.reveal_pending
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Some(index) = node
+            .reveal
+            .as_deref()
+            .and_then(|id| self.item_keys.iter().position(|(item_id, _)| item_id == id))
+        {
+            let offset =
+                if node.reveal_strategy.as_deref() == Some("top") && node.reveal_offset < 0.0 {
+                    self.pending_reveal = Some((index, node.reveal_offset));
+                    self.reveal_pending
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                    0.0
+                } else {
+                    node.reveal_offset
+                };
+            reveal_item(
+                &self.list_state,
+                index,
+                node.reveal_strategy.as_deref(),
+                offset,
+            );
         }
     }
 
@@ -55,11 +169,35 @@ impl ComponentVirtualCollection {
     ) -> bool {
         let next_alignment = node.alignment.as_deref().unwrap_or("top");
         let next_overdraw = (node.overdraw as f32).clamp(0.0, 4096.0);
-        if self.alignment != next_alignment || self.overdraw != next_overdraw {
+        if self.alignment != next_alignment
+            || self.overdraw != next_overdraw
+            || self.measure_all != node.measure_all
+        {
             return false;
         }
 
+        if self.measure_event != node.measure {
+            self.measure_event = node.measure.clone();
+            self.measured_sizes.clear();
+        }
+        self.measured_sizes.retain(|id, _| {
+            self.item_keys.iter().find(|(key, _)| key == id)
+                == item_keys.iter().find(|(key, _)| key == id)
+        });
         reconcile_item_keys(&self.list_state, &self.item_keys, &item_keys);
+        if self.item_keys.is_empty()
+            && !item_keys.is_empty()
+            && next_alignment == "top"
+            && node.follow.as_deref() != Some("tail")
+        {
+            self.list_state.scroll_to(gpui::ListOffset {
+                item_ix: 0,
+                offset_in_item: gpui::px(0.0),
+            });
+        }
+        if self.measure_all && self.item_keys != item_keys {
+            self.list_state.clone().measure_all();
+        }
         self.item_states
             .retain(|id, _state| item_keys.iter().any(|(item_id, _revision)| item_id == id));
         self.item_keys = item_keys;
@@ -68,6 +206,13 @@ impl ComponentVirtualCollection {
             self.range_event = node.range.clone();
             if let Ok(mut last_range) = self.last_visible_range.lock() {
                 *last_range = None;
+            }
+        }
+
+        if self.scroll_event != node.scroll {
+            self.scroll_event = node.scroll.clone();
+            if let Ok(mut previous) = self.last_scroll.lock() {
+                *previous = None;
             }
         }
 
@@ -84,16 +229,7 @@ impl ComponentVirtualCollection {
             self.last_follow_request = node.follow_request;
         }
 
-        if node.reveal_request > self.last_reveal_request {
-            if let Some(index) = node.reveal.as_deref().and_then(|id| {
-                self.item_keys
-                    .iter()
-                    .position(|(item_id, _revision)| item_id == id)
-            }) {
-                reveal_item(&self.list_state, index, node.reveal_strategy.as_deref());
-            }
-            self.last_reveal_request = node.reveal_request;
-        }
+        self.request_reveal(node);
         true
     }
 }
@@ -149,21 +285,7 @@ pub(crate) fn render(
             .list_state
             .set_follow_mode(follow_mode(component.follow.as_str()));
         component.last_follow_request = node.follow_request;
-        if node.reveal_request > 0 {
-            if let Some(index) = node.reveal.as_deref().and_then(|id| {
-                component
-                    .item_keys
-                    .iter()
-                    .position(|(item_id, _revision)| item_id == id)
-            }) {
-                reveal_item(
-                    &component.list_state,
-                    index,
-                    node.reveal_strategy.as_deref(),
-                );
-            }
-            component.last_reveal_request = node.reveal_request;
-        }
+        component.request_reveal(&node);
         context
             .components
             .insert_virtual_collection(&node.id, component);
@@ -174,12 +296,24 @@ pub(crate) fn render(
         .virtual_collection_mut(&node.id)
         .expect("virtual collection must exist after insertion");
     let list_state = component.list_state.clone();
+    let scrollbar_state = component.scrollbar.clone();
+    let pending_reveal = component.pending_reveal.take();
+    let reveal_generation = component.reveal_generation.clone();
+    let reveal_pending = component.reveal_pending.clone();
+    let metrics = node.scroll.as_ref().map(|event| ScrollMetrics {
+        root: context.cx.weak_entity(),
+        collection: node.id.clone(),
+        event: event.clone(),
+        previous: component.last_scroll.clone(),
+        reveal_pending: reveal_pending.clone(),
+    });
     install_scroll_handler(
         &list_state,
         context.runtime.clone(),
         context.window_id,
         node.range.clone(),
         component.last_visible_range.clone(),
+        metrics.clone(),
     );
     schedule_visible_range(
         &list_state,
@@ -190,7 +324,75 @@ pub(crate) fn render(
         component.last_visible_range.clone(),
         context.window,
         context.cx,
+        metrics.clone(),
     );
+
+    if let Some((index, offset)) = pending_reveal {
+        let state = list_state.clone();
+        let request = node.reveal_request;
+        context
+            .cx
+            .defer_in(context.window, move |_root, _window, cx| {
+                if reveal_generation.load(std::sync::atomic::Ordering::Relaxed) != request {
+                    return;
+                }
+                state.scroll_to(gpui::ListOffset {
+                    item_ix: index,
+                    offset_in_item: gpui::px(0.0),
+                });
+                state.scroll_by(gpui::px(offset.clamp(-10_000_000.0, 0.0) as f32));
+                reveal_pending.store(false, std::sync::atomic::Ordering::Relaxed);
+                cx.notify();
+            });
+    }
+
+    if let Some(event) = node.measure.clone() {
+        let id = node.id.clone();
+        context
+            .cx
+            .defer_in(context.window, move |root, _window, _cx| {
+                let Some(collection) = root.components.virtual_collection_mut(&id) else {
+                    return;
+                };
+                if collection.measure_event.as_deref() != Some(event.as_str()) {
+                    return;
+                }
+                let viewport = collection.list_state.viewport_bounds();
+                let first = collection.list_state.logical_scroll_top().item_ix;
+                for index in first..collection.item_keys.len() {
+                    let Some(bounds) = collection.list_state.bounds_for_item(index) else {
+                        break;
+                    };
+                    if bounds.top() > viewport.bottom() + gpui::px(collection.overdraw) {
+                        break;
+                    }
+                    let item_id = &collection.item_keys[index].0;
+                    let size = (
+                        f32::from(bounds.size.width) as f64,
+                        f32::from(bounds.size.height) as f64,
+                    );
+                    if collection.measured_sizes.get(item_id) == Some(&size) {
+                        continue;
+                    }
+                    collection.measured_sizes.insert(item_id.clone(), size);
+                    let _ = crate::push_event(
+                        &root.runtime,
+                        crate::NativeEvent::Bounds {
+                            window_id: root.window_id,
+                            event: event.clone(),
+                            value: crate::event::ElementBoundsGeometry {
+                                id: item_id.clone(),
+                                x: f32::from(bounds.origin.x) as f64,
+                                y: f32::from(bounds.origin.y) as f64,
+                                width: size.0,
+                                height: size.1,
+                                coordinate_space: "window_native_pixels".into(),
+                            },
+                        },
+                    );
+                }
+            });
+    }
 
     let items = Arc::new(items);
     let collection_id = node.id.clone();
@@ -198,12 +400,69 @@ pub(crate) fn render(
         render_variable_item(root, &collection_id, &items[index], window, cx)
     });
 
+    use gpui_component::ActiveTheme;
+    let foreground = node
+        .style
+        .color
+        .map(|color| gpui::rgba(color).into())
+        .unwrap_or(context.cx.theme().foreground);
+    let content = list(list_state.clone(), processor).size_full();
+    let auto_gutter = node.scrollbar && node.scrollbar_gutter.as_deref() == Some("auto");
+    let reserve_gutter =
+        node.scrollbar && (!auto_gutter || list_state.max_offset_for_scrollbar().y > gpui::px(0.));
+    let gutter_probe = if auto_gutter {
+        let measured = list_state.clone();
+        let root = context.cx.weak_entity();
+        Some(
+            gpui::canvas(
+                |_, _, _| (),
+                move |_, _, _, cx| {
+                    let overflow = measured.max_offset_for_scrollbar().y > gpui::px(0.);
+                    if overflow != reserve_gutter {
+                        let root = root.clone();
+                        cx.defer(move |cx| {
+                            let _ = root.update(cx, |_, cx| cx.notify());
+                        });
+                    }
+                },
+            )
+            .absolute()
+            .inset_0(),
+        )
+    } else {
+        None
+    };
+    let content = if reserve_gutter {
+        gpui::div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .bottom_0()
+            .right(gpui::px(10.0))
+            .child(content)
+            .into_any_element()
+    } else {
+        content.into_any_element()
+    };
     let element = apply_generated_render_styles(gpui::div(), node.style).id(node.id.clone());
-    crate::element::register_test_target(element, node.id, None, context)
+    let element = crate::element::register_test_target(element, node.id, None, context)
+        .relative()
         .role(Role::List)
         .aria_label(node.label.unwrap_or_else(|| "Items".to_string()))
-        .child(list(list_state, processor).size_full())
-        .into_any_element()
+        .child(content)
+        .children(gutter_probe);
+    if node.scrollbar {
+        element
+            .child(vertical_scrollbar(
+                list_state,
+                scrollbar_state,
+                foreground,
+                metrics,
+            ))
+            .into_any_element()
+    } else {
+        element.into_any_element()
+    }
 }
 
 #[cfg(feature = "components")]
@@ -229,6 +488,10 @@ fn render_variable_item(
     let mut active_input_ids = HashSet::new();
     let children = {
         let mut item_context = ElementRenderContext {
+            pointer_observers: root.pointer_observers.clone(),
+            scrolls: root.scrolls.clone(),
+            horizontal_groups: root.horizontal_groups.clone(),
+            tooltip_focus_owner: None,
             runtime: runtime.clone(),
             window_id,
             next_element_id: 0,
@@ -269,7 +532,13 @@ fn reconcile_item_keys(state: &gpui::ListState, old: &[(String, u64)], new: &[(S
     let Some(change) = item_key_change(old, new) else {
         return;
     };
-    state.splice(change.old_range, change.new_count);
+    if old.len() == new.len() && old.iter().zip(new).all(|(old, new)| old.0 == new.0) {
+        // Presentation changes retain the source items. Remeasure rather than
+        // deleting/reinserting them, so GPUI can preserve and clamp the anchor.
+        state.remeasure_items(change.old_range);
+    } else {
+        state.splice(change.old_range, change.new_count);
+    }
 }
 
 #[cfg(any(feature = "components", test))]
@@ -309,8 +578,12 @@ fn install_scroll_handler(
     window_id: u64,
     event: Option<String>,
     last_visible_range: std::sync::Arc<std::sync::Mutex<Option<std::ops::Range<usize>>>>,
+    metrics: Option<ScrollMetrics>,
 ) {
-    state.set_scroll_handler(move |scroll, _window, _cx| {
+    state.set_scroll_handler(move |scroll, window, cx| {
+        if let Some(metrics) = &metrics {
+            metrics.schedule(window, cx);
+        }
         let Some(event) = event.as_deref() else {
             return;
         };
@@ -335,9 +608,13 @@ fn schedule_visible_range(
     last_visible_range: std::sync::Arc<std::sync::Mutex<Option<std::ops::Range<usize>>>>,
     window: &gpui::Window,
     cx: &mut gpui::Context<'_, crate::ElixirRoot>,
+    metrics: Option<ScrollMetrics>,
 ) {
     let state = state.clone();
     cx.defer_in(window, move |_root, _window, _cx| {
+        if let Some(metrics) = metrics {
+            metrics.emit(&state, &runtime, window_id);
+        }
         let Some(event) = event.as_deref() else {
             return;
         };
@@ -401,11 +678,11 @@ fn follow_mode(value: &str) -> gpui::FollowMode {
 }
 
 #[cfg(feature = "components")]
-fn reveal_item(state: &gpui::ListState, index: usize, strategy: Option<&str>) {
+fn reveal_item(state: &gpui::ListState, index: usize, strategy: Option<&str>, offset: f64) {
     match strategy {
         Some("top") => state.scroll_to(gpui::ListOffset {
             item_ix: index,
-            offset_in_item: gpui::px(0.0),
+            offset_in_item: gpui::px(offset.clamp(0.0, 10_000_000.0) as f32),
         }),
         _other => state.scroll_to_reveal_item(index),
     }
@@ -639,13 +916,35 @@ mod tests {
                 ("j", 0),
             ]),
         );
-        draw(cx, first_height, state.clone());
+        draw(cx, first_height.clone(), state.clone());
 
         assert_eq!(state.logical_scroll_top().item_ix, anchor.item_ix);
         assert_eq!(
             state.logical_scroll_top().offset_in_item,
             anchor.offset_in_item
         );
+
+        let old: Vec<_> = (0..10).map(|index| (index.to_string(), 1)).collect();
+        let new: Vec<_> = (0..10).map(|index| (index.to_string(), 2)).collect();
+        reconcile_item_keys(&state, &old, &new);
+        draw(cx, first_height.clone(), state.clone());
+        assert_eq!(state.logical_scroll_top().item_ix, anchor.item_ix);
+        assert_eq!(
+            state.logical_scroll_top().offset_in_item,
+            anchor.offset_in_item
+        );
+
+        state.scroll_to(gpui::ListOffset {
+            item_ix: 0,
+            offset_in_item: gpui::px(50.0),
+        });
+        draw(cx, first_height.clone(), state.clone());
+        first_height.set(5.0);
+        reconcile_item_keys(&state, &old, &new);
+        draw(cx, first_height, state.clone());
+        let clamped = state.logical_scroll_top();
+        assert_eq!(clamped.item_ix, 0);
+        assert!(clamped.offset_in_item <= gpui::px(5.0));
     }
 
     #[cfg(feature = "components")]
@@ -801,4 +1100,164 @@ pub(crate) fn render_item(
     context: &mut ElementRenderContext<'_, '_>,
 ) -> gpui::AnyElement {
     render_component_fallback(node.style, None, node.children, context)
+}
+
+#[cfg(feature = "components")]
+#[derive(Clone, Copy, Default)]
+struct VerticalScrollbarState {
+    grab: Option<f32>,
+    hovered: bool,
+}
+
+#[cfg(feature = "components")]
+fn vertical_scrollbar(
+    list: gpui::ListState,
+    state: std::rc::Rc<std::cell::Cell<VerticalScrollbarState>>,
+    foreground: gpui::Hsla,
+    metrics: Option<ScrollMetrics>,
+) -> gpui::AnyElement {
+    use gpui::{IntoElement, Styled};
+    let geometry_list = list.clone();
+    gpui::canvas(
+        move |bounds, window, _| {
+            let maximum = f32::from(geometry_list.max_offset_for_scrollbar().y);
+            let height = f32::from(bounds.size.height);
+            if maximum <= 0.0 || height <= 0.0 {
+                return None;
+            }
+            let length = (height * height / (height + maximum)).max(18.0).min(height);
+            let offset = -f32::from(geometry_list.scroll_px_offset_for_scrollbar().y);
+            let start = offset.clamp(0.0, maximum) / maximum * (height - length);
+            let hitbox = window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal);
+            Some((hitbox, maximum, length, start))
+        },
+        move |bounds, geometry, window, _| {
+            let Some((hitbox, maximum, length, start)) = geometry else {
+                return;
+            };
+            let mut color = foreground;
+            color.a *= if state.get().hovered || state.get().grab.is_some() {
+                0.35
+            } else {
+                0.20
+            };
+            let thumb = gpui::Bounds::new(
+                gpui::point(
+                    bounds.origin.x + gpui::px(2.0),
+                    bounds.origin.y + gpui::px(start + 2.0),
+                ),
+                gpui::size(gpui::px(6.0), gpui::px((length - 4.0).max(0.0))),
+            );
+            window.paint_quad(gpui::fill(thumb, color).corner_radii(gpui::px(3.0)));
+
+            let wheel_list = list.clone();
+            let wheel_metrics = metrics.clone();
+            let wheel_hitbox = hitbox.clone();
+            window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, phase, window, cx| {
+                if phase.bubble()
+                    && wheel_hitbox.is_hovered(window)
+                    && bounds.contains(&event.position)
+                {
+                    let delta = event.delta.pixel_delta(window.line_height());
+                    if delta.y != gpui::px(0.0) {
+                        wheel_list.scroll_by(-delta.y);
+                        if let Some(metrics) = &wheel_metrics {
+                            metrics.schedule(window, cx);
+                        }
+                        window.refresh();
+                        cx.stop_propagation();
+                    }
+                }
+            });
+
+            let down_state = state.clone();
+            let down_list = list.clone();
+            let down_metrics = metrics.clone();
+            window.on_mouse_event(move |event: &gpui::MouseDownEvent, phase, window, cx| {
+                if !phase.bubble()
+                    || event.button != gpui::MouseButton::Left
+                    || !hitbox.is_hovered(window)
+                {
+                    return;
+                }
+                let y = f32::from(event.position.y - bounds.origin.y);
+                if y >= start && y <= start + length {
+                    down_state.set(VerticalScrollbarState {
+                        grab: Some(y - start),
+                        hovered: true,
+                    });
+                    down_list.scrollbar_drag_started();
+                } else {
+                    down_list.scroll_by(gpui::px(if y < start {
+                        -f32::from(bounds.size.height)
+                    } else {
+                        f32::from(bounds.size.height)
+                    }));
+                    if let Some(metrics) = &down_metrics {
+                        metrics.schedule(window, cx);
+                    }
+                }
+                window.prevent_default();
+                window.refresh();
+                cx.stop_propagation();
+            });
+
+            let move_state = state.clone();
+            let move_list = list.clone();
+            let move_metrics = metrics.clone();
+            window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, window, cx| {
+                if !phase.capture() {
+                    return;
+                }
+                let previous = move_state.get();
+                let hovered = thumb.contains(&event.position);
+                move_state.set(VerticalScrollbarState {
+                    hovered,
+                    ..previous
+                });
+                if let Some(grab) = previous.grab {
+                    let travel = f32::from(bounds.size.height) - length;
+                    let y = f32::from(event.position.y - bounds.origin.y) - grab;
+                    let offset = if travel > 0.0 {
+                        (y / travel).clamp(0.0, 1.0) * maximum
+                    } else {
+                        0.0
+                    };
+                    move_list
+                        .set_offset_from_scrollbar(gpui::point(gpui::px(0.0), gpui::px(-offset)));
+                    if let Some(metrics) = &move_metrics {
+                        metrics.schedule(window, cx);
+                    }
+                    window.refresh();
+                    cx.stop_propagation();
+                } else if previous.hovered != hovered {
+                    window.refresh();
+                }
+            });
+
+            let up_state = state.clone();
+            let up_list = list.clone();
+            window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, window, cx| {
+                if phase.capture()
+                    && event.button == gpui::MouseButton::Left
+                    && up_state.get().grab.is_some()
+                {
+                    let previous = up_state.get();
+                    up_state.set(VerticalScrollbarState {
+                        grab: None,
+                        ..previous
+                    });
+                    up_list.scrollbar_drag_ended();
+                    window.refresh();
+                    cx.stop_propagation();
+                }
+            });
+        },
+    )
+    .absolute()
+    .top_0()
+    .bottom_0()
+    .right_0()
+    .w(gpui::px(10.0))
+    .into_any_element()
 }

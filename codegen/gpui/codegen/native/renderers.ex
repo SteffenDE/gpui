@@ -42,7 +42,7 @@ defmodule GPUI.Codegen.Native.Renderers do
     path
     |> Syn.parse_file!()
     |> Syn.functions()
-    |> Enum.filter(&(Type.type_name(&1.returns_ast) == "AnyElement"))
+    |> Enum.filter(&match?(%Type.Path{name: "AnyElement"}, &1.returns_ast))
     |> Enum.flat_map(fn function ->
       case Enum.find(function.args, &(node_type(&1) != nil)) do
         nil ->

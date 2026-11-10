@@ -63,4 +63,7 @@ defmodule GPUI.Codegen.Native.DisabledWindow do
           Theme.t()
         ) :: R.nif_result(term())
   defnif(set_theme(_runtime, _mode), do: real_gpui_disabled())
+  @nif schedule: :dirty_io
+  @spec load_font(R.resource(RuntimeResource.t()), binary()) :: R.nif_result(term())
+  defnif(load_font(_runtime, _bytes), do: real_gpui_disabled())
 end

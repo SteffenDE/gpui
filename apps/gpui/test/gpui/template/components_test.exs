@@ -89,17 +89,26 @@ defmodule GPUI.Template.ComponentsTest do
     end
   end
 
-  test "tooltip requires textual content" do
+  test "tooltip accepts display content while shortcuts remain textual" do
     trigger = %GPUI.Template.Component.Slot{children: ["Open"]}
-    content = %GPUI.Template.Component.Slot{children: [%GPUI.Element{type: :div}]}
+
+    card = %GPUI.Element{
+      type: :div,
+      children: [%GPUI.Element{type: :text, children: ["Full label"]}]
+    }
+
+    content = %GPUI.Template.Component.Slot{children: [card]}
+    options = %{id: "help", trigger: [trigger], content: [content], children: []}
+
+    assert %GPUI.Element{
+             children: [
+               %GPUI.Element{type: :ui_tooltip_trigger},
+               %GPUI.Element{type: :ui_tooltip_content, children: [^card]}
+             ]
+           } = Overlay.tooltip(options)
 
     assert_raise ArgumentError, ~r/must be textual/, fn ->
-      Overlay.tooltip(%{
-        id: "help",
-        trigger: [trigger],
-        content: [content],
-        children: []
-      })
+      Overlay.tooltip(Map.put(options, :shortcut, [content]))
     end
   end
 

@@ -23,6 +23,7 @@ defmodule GPUI.Codegen.Native.SchemaType.Macros do
          end)) ++
         [
           image: [quote(do: ImageNode.t())],
+          svg: [quote(do: SvgNode.t())],
           text: [quote(do: TextNode.t())]
         ]
 

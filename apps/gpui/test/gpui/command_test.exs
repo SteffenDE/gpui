@@ -321,9 +321,33 @@ defmodule GPUI.CommandTest do
     end
   end
 
+  test "supports navigation and Shift-only command payloads" do
+    commands =
+      Command.validate_all!([
+        Command.new("sidebar", "s"),
+        Command.new("reviewed", "2"),
+        Command.new("mark_file", "shift-r")
+      ])
+
+    assert Enum.map(commands, &Command.to_payload/1) == [
+             {"sidebar", "s"},
+             {"reviewed", "2"},
+             {"mark_file", "shift-r"}
+           ]
+  end
+
+  test "supports canonical named navigation keys" do
+    for key <-
+          ~w(enter escape tab space backspace delete up down left right home end pageup pagedown) do
+      assert Command.new("navigate", key).shortcut == key
+    end
+
+    assert_raise ArgumentError, fn -> Command.new("open", "return") end
+  end
+
   test "rejects malformed and duplicate command contracts" do
-    assert_raise ArgumentError, ~r/primary, ctrl, or alt/, fn ->
-      Command.new("refresh", "shift-r")
+    assert_raise ArgumentError, ~r/canonical modifiers/, fn ->
+      Command.new("refresh", "shift-primary-r")
     end
 
     assert_raise ArgumentError, ~r/lowercase key/, fn ->

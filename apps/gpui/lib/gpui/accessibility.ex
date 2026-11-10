@@ -18,6 +18,9 @@ defmodule GPUI.Accessibility do
     link: %{gpui: :Link, interaction: :activate},
     list: %{gpui: :List, interaction: :structural},
     list_item: %{gpui: :ListItem, interaction: :structural},
+    menu: %{gpui: :Menu, interaction: :structural},
+    menu_item: %{gpui: :MenuItem, interaction: :activate},
+    menu_item_checkbox: %{gpui: :MenuItemCheckBox, interaction: :activate},
     progress: %{gpui: :ProgressIndicator, interaction: :value},
     radio: %{gpui: :RadioButton, interaction: :activate},
     slider: %{gpui: :Slider, interaction: :value},
@@ -48,12 +51,13 @@ defmodule GPUI.Accessibility do
   ]
 
   @state_roles [
-    accessibility_checked: ~w(checkbox radio switch),
+    accessibility_checked: ~w(checkbox menu_item_checkbox radio switch),
     accessibility_selected: ~w(list_item tab tree_item),
-    accessibility_expanded: ~w(button tree_item),
+    accessibility_expanded: ~w(button menu_item tree_item),
     accessibility_orientation: ~w(slider splitter tab_list tree),
     accessibility_value: ~w(progress slider textbox),
-    accessibility_disabled: ~w(button checkbox link radio slider splitter switch textbox)
+    accessibility_disabled:
+      ~w(button checkbox link menu_item menu_item_checkbox radio slider splitter switch textbox)
   ]
 
   @type role :: String.t()

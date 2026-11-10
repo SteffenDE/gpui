@@ -8,6 +8,7 @@ defmodule GPUI.EventTest do
              :click,
              :command,
              :change,
+             :open,
              :release,
              :search,
              :submit,
@@ -18,6 +19,19 @@ defmodule GPUI.EventTest do
              :window_blur,
              :window_closed
            ]
+  end
+
+  test "click modifiers are optional and validated without changing plain click events" do
+    event = %{type: :click, window_id: 1, event: "open"}
+    assert {:ok, ^event} = Event.normalize(event)
+    modifiers = %{control: false, alt: false, shift: true, platform: true}
+    modified = Map.put(event, :modifiers, modifiers)
+    assert {:ok, ^modified} = Event.normalize(modified)
+
+    for invalid <- [nil, %{}, %{modifiers | shift: "yes"}] do
+      assert {:error, {:invalid_event, :modifiers}} =
+               Event.normalize(Map.put(event, :modifiers, invalid))
+    end
   end
 
   test "requires an explicit known event type" do
@@ -89,5 +103,39 @@ defmodule GPUI.EventTest do
                event: "visible",
                value: %{first: 5, last: 2}
              })
+  end
+
+  test "rich link hover carries finite span geometry and an explicit exit" do
+    value = %{
+      id: "message:0",
+      link: "@mira",
+      hovered: true,
+      x: 12.5,
+      y: 20,
+      width: 42,
+      height: 20,
+      coordinate_space: "window_native_pixels"
+    }
+
+    event = %{type: :link_hover, window_id: 1, event: "mention", value: value}
+    assert {:ok, ^event} = Event.normalize(event)
+    assert {:ok, _} = Event.normalize(%{event | value: %{value | hovered: false}})
+
+    for invalid <- [
+          Map.delete(value, :id),
+          Map.delete(value, :x),
+          %{value | width: -1},
+          %{value | hovered: "true"}
+        ] do
+      assert {:error, _} = Event.normalize(%{event | value: invalid})
+    end
+  end
+
+  test "pointer observations require hover and all modifier booleans" do
+    value = %{hovered: true, control: false, alt: false, shift: true, platform: true}
+    event = %{type: :pointer, window_id: 1, event: "header", value: value}
+    assert {:ok, ^event} = GPUI.Event.normalize(event)
+    assert {:error, _} = GPUI.Event.normalize(%{event | value: Map.delete(value, :hovered)})
+    assert {:error, _} = GPUI.Event.normalize(%{event | value: %{value | shift: "true"}})
   end
 end

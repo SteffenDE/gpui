@@ -30,10 +30,31 @@ defmodule GPUI.UI.Overlay do
   @anchors ~w(top_left top_center top_right bottom_left bottom_center bottom_right left_center right_center)
 
   @doc """
-  Builds a native tooltip with one `:trigger` and one textual `:content` slot.
+  Builds a native tooltip with one `:trigger` and one `:content` slot.
+  Content accepts text or display elements such as icons, styled spans and layouts.
+  Interactive controls belong in a popover.
+  `top_start`/`top_end` and `bottom_start`/`bottom_end` align to trigger edges.
 
   `delay` is the show delay in milliseconds from `0` through `60_000`. Set `hoverable` when
   the pointer may move into the tooltip without dismissing it.
+  `close_delay` controls dismissal after leaving both surfaces (default 500ms);
+  zero closes immediately while allowing transfer across an anchored gap.
+
+  `keyboard: true` shows on Tab-originated trigger focus and enables Escape
+  dismissal. It does not add a Tab stop. The default is false.
+
+  `placement` defaults to `"cursor"`; `"top"`, `"bottom"`, `"left"` and `"right"`
+  anchor to the trigger with `offset` pixels of spacing, flipping and clamping
+  within the viewport. `collision_padding` sets the viewport margin in logical
+  pixels (default 4, range 0 through 1_000_000). Anchored origins round to the
+  nearest physical pixel after fitting; content size stays unchanged.
+  `appearance: false` removes native chrome. Styles on
+  `:content` apply to the tooltip body, and an optional textual `:shortcut` slot
+  carries independently styled accessory text. Set `letter_spacing` on the
+  shortcut slot to add pixels of tracking per grapheme, including the final
+  trailing advance. Its default is zero and retains ordinary text rendering.
+  Nonzero tracking uses a single shaped line with optional liga/clig ligatures
+  disabled; inherited kerning, font fallback and text styling are retained.
 
   #{ComponentsSchema.component_options_doc(:ui_tooltip)}
   """
@@ -42,20 +63,58 @@ defmodule GPUI.UI.Overlay do
     assigns =
       assigns
       |> ComponentsSchema.apply_defaults(:ui_tooltip)
-      |> ComponentsSchema.validate_component_assigns!(:ui_tooltip, [:trigger, :content])
+      |> ComponentsSchema.validate_component_assigns!(:ui_tooltip, [:trigger, :content, :shortcut])
 
     trigger = one_slot!(assigns, :trigger, :tooltip)
     content = one_slot!(assigns, :content, :tooltip)
-    text = tooltip_text!(content.children)
+    rich = Enum.any?(content.children, &match?(%Element{}, &1))
+    text = if rich, do: "", else: tooltip_text!(content.children)
+    shortcut = Map.get(assigns, :shortcut, [])
+
+    if length(shortcut) > 1,
+      do: raise(ArgumentError, "tooltip accepts at most one :shortcut slot")
+
+    styled = rich or content.attrs != [] or shortcut != [] or not assigns.appearance
+
+    content_nodes =
+      if styled,
+        do: [
+          %Element{
+            type: :ui_tooltip_content,
+            attrs: Keyword.put(content.attrs, :text, text),
+            children: if(rich, do: content.children, else: [])
+          }
+        ],
+        else: []
+
+    shortcut_nodes =
+      Enum.map(shortcut, fn slot ->
+        ComponentsSchema.validate_component_assigns!(
+          Map.new(Keyword.take(slot.attrs, [:letter_spacing])),
+          :ui_tooltip_shortcut
+        )
+
+        %Element{
+          type: :ui_tooltip_shortcut,
+          attrs: Keyword.put(slot.attrs, :text, tooltip_text!(slot.children))
+        }
+      end)
 
     unless Map.get(assigns, :children, []) == [] do
       raise ArgumentError, "tooltip content must use :trigger and :content named slots"
     end
 
     unless is_number(assigns.delay) and assigns.delay >= 0 and assigns.delay <= 60_000 and
-             is_boolean(assigns.hoverable) do
+             is_number(assigns.close_delay) and assigns.close_delay >= 0 and
+             assigns.close_delay <= 60_000 and
+             is_boolean(assigns.hoverable) and is_boolean(assigns.keyboard) and
+             is_boolean(assigns.appearance) and
+             assigns.placement in ~w(cursor top top_start top_end bottom bottom_start bottom_end left right) and
+             is_number(assigns.offset) and
+             assigns.offset >= 0 and is_number(assigns.collision_padding) and
+             assigns.collision_padding >= 0 and assigns.collision_padding <= 1.0e6 do
       raise ArgumentError,
-            "tooltip delay must be between 0 and 60_000 and hoverable must be a boolean"
+            "tooltip needs delay and close_delay between 0 and 60_000, boolean appearance/hoverable/keyboard, a supported placement, nonnegative offset and collision_padding between 0 and 1_000_000"
     end
 
     id = component_id!(assigns, :ui_tooltip)
@@ -64,14 +123,16 @@ defmodule GPUI.UI.Overlay do
       type: :ui_tooltip,
       attrs:
         assigns
-        |> Map.drop([:children, :trigger, :content])
+        |> Map.drop([:children, :trigger, :content, :shortcut])
         |> Map.put(:id, id)
         |> Map.put(:text, text)
         |> Map.put(:delay, assigns.delay / 1)
+        |> Map.put(:close_delay, assigns.close_delay / 1)
         |> Map.to_list(),
-      children: [
-        %Element{type: :ui_tooltip_trigger, attrs: trigger.attrs, children: trigger.children}
-      ]
+      children:
+        [
+          %Element{type: :ui_tooltip_trigger, attrs: trigger.attrs, children: trigger.children}
+        ] ++ content_nodes ++ shortcut_nodes
     }
   end
 
@@ -82,14 +143,21 @@ defmodule GPUI.UI.Overlay do
   trigger. Changes to `open` are emitted through `phx-change`. The native dialog traps
   focus while open and restores the previous focus when it closes, unless another
   element requests focus in the same render. Escape and overlay clicks request
-  closure when enabled. Enter belongs to the content (for example, an input's
+  closure when enabled. Set `pointer_dismiss: false` to keep outside clicks from
+  dismissing a confirmation while retaining Escape. Enter belongs to the content (for example, an input's
   `phx-submit`); it does not request closure. Set `open: false` after a successful
   submission to close the dialog.
 
   Set `show_title: false` for search-first dialogs without a visible heading.
   `title` still names the dialog contract and optional trigger. `margin_top`
-  controls the dialog's distance from the top of the window; omitting it retains
+  controls the dialog's distance from the top of the window. `margin_top_ratio`
+  instead uses a fraction of the current viewport height (0 to 1), including
+  after resizing. Supply at most one of these options; omitting both retains
   the native viewport-relative placement.
+
+  `fullscreen: true` fills the current native viewport, removes dialog padding
+  and borders, and overrides width and top-margin placement. Content dimensions
+  follow native window resizing without requiring application layout updates.
 
   #{ComponentsSchema.component_options_doc(:ui_dialog)}
   """
@@ -254,6 +322,22 @@ defmodule GPUI.UI.Overlay do
   @doc """
   Builds a controlled popover with one `:trigger` and one `:content` slot.
 
+  Set `open_on_hover` for pointer activation, with `hover_delay` and `close_delay`
+  in milliseconds. Crossing from the trigger into the content keeps it open.
+  Set `focus_on_open: false` for previews that preserve the current input focus.
+  Set `trigger_passthrough: true` when the trigger child owns focus and
+  activation. The wrapper then leaves Tab, Enter/Space, and pointer activation
+  to that control. Pair it with `open_on_hover: true` for hover cards decorating
+  links without adding a second focus stop or toggling the card on link activation.
+  The default `false` retains the wrapper's focusable button behavior.
+
+  Supply all four `anchor_x`, `anchor_y`, `anchor_width`, and `anchor_height`
+  values for a window-relative virtual anchor, such as a rich-text link span.
+  `anchor_hovered` controls its hover timer without adding a pointer-blocking
+  trigger. The trigger slot remains required but may contain an empty div.
+  For virtual anchors, `parent_popover` names an enclosing hover preview so clicks inside a deferred child
+  do not dismiss its parent. Escape dismisses the most recently opened preview.
+
   A non-empty `label` names the trigger and its expanded state. Changes to `open` are emitted through `phx-change`. Escape and, by default,
   outside clicks request closure and restore focus to the trigger.
 
@@ -274,14 +358,42 @@ defmodule GPUI.UI.Overlay do
     end
 
     unless is_boolean(assigns.open) and is_boolean(assigns.appearance) and
-             is_boolean(assigns.closable) do
-      raise ArgumentError, "popover open, appearance, and closable must be booleans"
+             is_boolean(assigns.closable) and is_boolean(assigns.open_on_hover) and
+             is_boolean(assigns.focus_on_open) and is_boolean(assigns.trigger_passthrough) do
+      raise ArgumentError,
+            "popover open, appearance, closable, open_on_hover, focus_on_open, and trigger_passthrough must be booleans"
     end
 
     unless assigns.anchor in @anchors do
       raise ArgumentError,
             "popover anchor must be one of #{Enum.map_join(@anchors, ", ", &inspect/1)}"
     end
+
+    unless Enum.all?(
+             [assigns.hover_delay, assigns.close_delay],
+             &(is_number(&1) and &1 >= 0 and &1 <= 60_000)
+           ) do
+      raise ArgumentError,
+            "popover hover_delay and close_delay must be between 0 and 60_000 milliseconds"
+    end
+
+    rectangle =
+      Enum.map([:anchor_x, :anchor_y, :anchor_width, :anchor_height], &Map.get(assigns, &1))
+
+    unless Enum.all?(rectangle, &is_nil/1) or
+             (Enum.all?(rectangle, &(is_number(&1) and abs(&1) <= 1_000_000)) and
+                Enum.at(rectangle, 2) >= 0 and Enum.at(rectangle, 3) >= 0) do
+      raise ArgumentError,
+            "popover virtual anchors require four finite window coordinates and nonnegative dimensions"
+    end
+
+    parent = Map.get(assigns, :parent_popover)
+
+    unless parent == nil or (is_binary(parent) and byte_size(parent) in 1..256),
+      do: raise(ArgumentError, "popover parent_popover must be a non-empty component id")
+
+    unless is_boolean(assigns.anchor_hovered),
+      do: raise(ArgumentError, "popover anchor_hovered must be boolean")
 
     id = component_id!(assigns, :ui_popover)
 
@@ -372,6 +484,13 @@ defmodule GPUI.UI.Overlay do
     end
 
     margin_top = assigns[:margin_top]
+    ratio = assigns[:margin_top_ratio]
+
+    unless is_nil(ratio) or (is_number(ratio) and ratio >= 0 and ratio <= 1),
+      do: raise(ArgumentError, "dialog margin_top_ratio must be between 0 and 1")
+
+    if not is_nil(ratio) and not is_nil(margin_top),
+      do: raise(ArgumentError, "dialog accepts margin_top or margin_top_ratio, not both")
 
     unless is_nil(margin_top) or
              (is_number(margin_top) and margin_top >= 0 and margin_top <= 4096) do

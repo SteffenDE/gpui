@@ -178,7 +178,13 @@ pub(crate) fn render(
     } else {
         12.0
     };
-    let content_width = gutter_width + max_columns as f32 * 8.5 + 24.0;
+    let theme = context.cx.theme();
+    let (mono_font_family, mono_font_size) = code_font(
+        &node.style,
+        theme.mono_font_family.clone(),
+        theme.mono_font_size,
+    );
+    let content_width = gutter_width + max_columns as f32 * f32::from(mono_font_size) * 0.6 + 24.0;
 
     let vertical_scroll = component.collection.scroll_handle.clone();
     let horizontal_scroll = component.horizontal_scroll_handle.clone();
@@ -213,8 +219,8 @@ pub(crate) fn render(
         muted_foreground: theme.muted_foreground,
         selected_background: theme.primary,
         selected_foreground: theme.primary_foreground,
-        mono_font_family: theme.mono_font_family.clone(),
-        mono_font_size: theme.mono_font_size,
+        mono_font_family,
+        mono_font_size,
     };
     let processor = context.cx.processor(move |root, range, window, cx| {
         render_visible_lines(root, &visible, range, window, cx)
@@ -660,9 +666,36 @@ pub(crate) fn render_line(
         .into_any_element()
 }
 
+#[cfg(feature = "components")]
+fn code_font(
+    style: &crate::StyleAttrs,
+    family: gpui::SharedString,
+    size: gpui::Pixels,
+) -> (gpui::SharedString, gpui::Pixels) {
+    (
+        style.font_family.clone().map(Into::into).unwrap_or(family),
+        style.font_size.map(gpui::px).unwrap_or(size),
+    )
+}
+
 #[cfg(all(test, feature = "components"))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_font_uses_explicit_styles_and_retains_theme_defaults() {
+        let mut style = crate::StyleAttrs::default();
+        assert_eq!(
+            code_font(&style, "Menlo".into(), gpui::px(14.0)),
+            ("Menlo".into(), gpui::px(14.0))
+        );
+        style.font_family = Some("JetBrains Mono".into());
+        style.font_size = Some(18.0);
+        assert_eq!(
+            code_font(&style, "Menlo".into(), gpui::px(14.0)),
+            ("JetBrains Mono".into(), gpui::px(18.0))
+        );
+    }
 
     #[test]
     fn tabs_expand_to_stable_columns() {

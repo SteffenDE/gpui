@@ -5,6 +5,7 @@ pub enum InjectKind {
     Click,
     Command,
     Change,
+    Open,
     Release,
     Search,
     Submit,

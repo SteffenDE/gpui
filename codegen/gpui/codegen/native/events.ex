@@ -31,6 +31,21 @@ defmodule GPUI.Codegen.Native.Events do
     do: encode_value_event(env, Atoms.keystroke(), window_id, event, value.encode(env))
   )
 
+  @spec encode_captured_keystroke_event(
+          Env.t(R.lifetime(:a)),
+          R.u64(),
+          String.t(),
+          KeyStroke.t(),
+          boolean()
+        ) ::
+          R.nif_result(Term.t(R.lifetime(:a)))
+  defrust encode_captured_keystroke_event(env, window_id, event, value, captured) do
+    encoded =
+      unwrap!(value.encode(env).map_put(Atoms.captured().to_term(env), captured.encode(env)))
+
+    encode_value_event(env, Atoms.keystroke(), window_id, event, encoded)
+  end
+
   @spec encode_terminal_resize_event(Env.t(R.lifetime(:a)), R.u64(), String.t(), TerminalSize.t()) ::
           R.nif_result(Term.t(R.lifetime(:a)))
   defrust(encode_terminal_resize_event(env, window_id, event, value),
@@ -313,6 +328,55 @@ defmodule GPUI.Codegen.Native.Events do
     encode_event_map(env, entries)
   end
 
+  @allow RustQ.Clippy.lint(:too_many_arguments)
+  @spec encode_modified_input_event(
+          Env.t(R.lifetime(:a)),
+          R.ref(input_kind()),
+          R.u64(),
+          String.t(),
+          R.option(event_value()),
+          boolean(),
+          boolean(),
+          boolean(),
+          boolean()
+        ) :: R.nif_result(Term.t(R.lifetime(:a)))
+  defrust encode_modified_input_event(
+            env,
+            kind,
+            window_id,
+            event,
+            value,
+            control,
+            alt,
+            shift,
+            platform
+          ) do
+    modifiers =
+      unwrap!(
+        encode_event_map(env, [
+          {Atoms.control(), control.encode(env)},
+          {Atoms.alt(), alt.encode(env)},
+          {Atoms.shift(), shift.encode(env)},
+          {Atoms.platform(), platform.encode(env)}
+        ])
+      )
+
+    entries = [
+      {Atoms.type_atom(), kind.atom().to_term(env)},
+      {Atoms.window_id(), window_id.encode(env)},
+      {Atoms.event(), event.encode(env)},
+      {Atoms.modifiers(), modifiers}
+    ]
+
+    entries =
+      case value do
+        nil -> entries
+        {:some, value} -> append_event_value(entries, env, value)
+      end
+
+    encode_event_map(env, entries)
+  end
+
   @spec append_event_value(
           R.vec({Atom.t(), Term.t(R.lifetime(:a))}),
           Env.t(R.lifetime(:a)),
@@ -340,6 +404,83 @@ defmodule GPUI.Codegen.Native.Events do
     )
   end
 
+  @spec encode_modified_click_event(
+          Env.t(R.lifetime(:a)),
+          R.u64(),
+          String.t(),
+          boolean(),
+          boolean(),
+          boolean(),
+          boolean()
+        ) :: R.nif_result(Term.t(R.lifetime(:a)))
+  defrust encode_modified_click_event(env, window_id, event, control, alt, shift, platform) do
+    modifiers =
+      unwrap!(
+        encode_event_map(env, [
+          {Atoms.control(), control.encode(env)},
+          {Atoms.alt(), alt.encode(env)},
+          {Atoms.shift(), shift.encode(env)},
+          {Atoms.platform(), platform.encode(env)}
+        ])
+      )
+
+    encode_event_map(env, [
+      {Atoms.type_atom(), Atoms.click().to_term(env)},
+      {Atoms.window_id(), window_id.encode(env)},
+      {Atoms.event(), event.encode(env)},
+      {Atoms.modifiers(), modifiers}
+    ])
+  end
+
+  @allow RustQ.Clippy.lint(:too_many_arguments)
+  @spec encode_pointer_state_event(
+          Env.t(R.lifetime(:a)),
+          R.u64(),
+          String.t(),
+          boolean(),
+          boolean(),
+          boolean(),
+          boolean(),
+          boolean()
+        ) :: R.nif_result(Term.t(R.lifetime(:a)))
+  defrust encode_pointer_state_event(
+            env,
+            window_id,
+            event,
+            hovered,
+            control,
+            alt,
+            shift,
+            platform
+          ) do
+    value =
+      unwrap!(
+        encode_event_map(env, [
+          {Atoms.hovered(), hovered.encode(env)},
+          {Atoms.control(), control.encode(env)},
+          {Atoms.alt(), alt.encode(env)},
+          {Atoms.shift(), shift.encode(env)},
+          {Atoms.platform(), platform.encode(env)}
+        ])
+      )
+
+    encode_value_event(env, Atoms.pointer(), window_id, event, value)
+  end
+
+  @spec encode_link_hover_event(
+          Env.t(R.lifetime(:a)),
+          R.u64(),
+          String.t(),
+          ElementBoundsGeometry.t(),
+          R.option(String.t()),
+          boolean()
+        ) :: R.nif_result(Term.t(R.lifetime(:a)))
+  defrust encode_link_hover_event(env, window_id, event, value, link, hovered) do
+    encoded = unwrap!(value.encode(env).map_put(Atoms.link().to_term(env), link.encode(env)))
+    encoded = unwrap!(encoded.map_put(Atoms.hovered().to_term(env), hovered.encode(env)))
+    encode_value_event(env, Atoms.link_hover(), window_id, event, encoded)
+  end
+
   @spec encode_window_event(
           Env.t(R.lifetime(:a)),
           Atom.t(),
@@ -353,6 +494,32 @@ defmodule GPUI.Codegen.Native.Events do
         {Atoms.window_id(), window_id.encode(env)}
       ]
     )
+  end
+
+  @spec encode_window_geometry(Env.t(R.lifetime(:a)), R.u64(), R.ref(R.vec(R.f64())), boolean()) ::
+          R.nif_result(Term.t(R.lifetime(:a)))
+  defrust encode_window_geometry(env, window_id, bounds, initial) do
+    value = unwrap!(encode_event_map(env, [
+      {Atoms.bounds(), bounds.encode(env)},
+      {Atoms.initial(), initial.encode(env)}
+    ]))
+    encode_event_map(env, [
+      {Atoms.type_atom(), Atoms.window_geometry().to_term(env)},
+      {Atoms.window_id(), window_id.encode(env)},
+      {Atoms.value(), value}
+    ])
+  end
+
+  @spec encode_window_appearance(Env.t(R.lifetime(:a)), R.u64(), boolean()) ::
+          R.nif_result(Term.t(R.lifetime(:a)))
+  defrust encode_window_appearance(env, window_id, dark) do
+    value = if dark, do: Atoms.dark(), else: Atoms.light()
+
+    encode_event_map(env, [
+      {Atoms.type_atom(), Atoms.window_appearance().to_term(env)},
+      {Atoms.window_id(), window_id.encode(env)},
+      {Atoms.value(), value.to_term(env)}
+    ])
   end
 
   @spec decode_event_value(term()) :: R.option(event_value())
@@ -428,13 +595,18 @@ defmodule GPUI.Codegen.Native.Events do
       :encode_input_event,
       :append_event_value,
       :encode_named_event,
+      :encode_modified_click_event,
+      :encode_pointer_state_event,
       :encode_window_event,
+      :encode_window_appearance,
+      :encode_window_geometry,
       :encode_value_event
     ]
 
     real_gpui_only = [
       :encode_virtual_range_event,
       :encode_keystroke_event,
+      :encode_captured_keystroke_event,
       :encode_terminal_resize_event,
       :encode_bounds_event,
       :encode_focus_event,
@@ -442,6 +614,8 @@ defmodule GPUI.Codegen.Native.Events do
     ]
 
     component_only = [
+      :encode_link_hover_event,
+      :encode_modified_input_event,
       :encode_clipboard_event,
       :encode_transfer_event,
       :encode_file_dialog_event,

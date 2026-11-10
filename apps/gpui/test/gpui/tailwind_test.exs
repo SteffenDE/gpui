@@ -12,6 +12,36 @@ defmodule GPUI.TailwindTest do
     end)
   end
 
+  test "shadow layers and outside rings retain CSS units and alpha" do
+    %{style: style, unknown: []} = GPUI.Tailwind.normalize("shadow-md ring-1 ring-[#d7dbe1]/10")
+
+    assert style[:box_shadow] == [
+             {0.0, 4.0, 6.0, -1.0, {:rgba, 0x0000001A}},
+             {0.0, 2.0, 4.0, -2.0, {:rgba, 0x0000001A}}
+           ]
+
+    assert style[:ring_width] == {:px, 1.0}
+    assert style[:ring_color] == {:rgba, 0xD7DBE11A}
+    assert GPUI.Tailwind.normalize("shadow-none").style[:box_shadow] == []
+  end
+
+  test "text hover colors retain their alpha and native style identity" do
+    assert %{unknown: [], style: [hover_color: {:rgba, 0xD7DBE180}]} =
+             GPUI.Tailwind.normalize("hover:text-[#d7dbe1]/50")
+  end
+
+  test "directional borders preserve independent edge widths" do
+    assert %{unknown: [], style: style} =
+             GPUI.Tailwind.normalize("border-t border-r border-b border-l")
+
+    assert Map.new(style) == %{
+             border_top_width: {:px, 1.0},
+             border_right_width: {:px, 1.0},
+             border_bottom_width: {:px, 1.0},
+             border_left_width: {:px, 1.0}
+           }
+  end
+
   test "programmatic UI components normalize classes before serialization" do
     payload =
       GPUI.UI.tree_item(%{
@@ -289,10 +319,10 @@ defmodule GPUI.TailwindTest do
                "group/row hover:bg-[#ff0000] invisible group-hover/row:visible"
              )
 
-    assert style[:group] == :row
+    assert style[:group] == "row"
     assert style[:hover_background] == {:rgb, 0xFF0000}
     assert style[:visibility] == :hidden
-    assert style[:group_hover_visible] == :row
+    assert style[:group_hover_visible] == "row"
 
     assert %{style: [group: :group, group_hover_invisible: :group], unknown: []} =
              GPUI.Tailwind.normalize("group group-hover:invisible")
@@ -301,5 +331,27 @@ defmodule GPUI.TailwindTest do
 
     assert %{unknown: ["group/Row", "group-hover/row:flex"]} =
              GPUI.Tailwind.normalize("group/Row group-hover/row:flex")
+  end
+
+  test "normalizes named and default group hover backgrounds" do
+    assert %{style: [group_hover_background: {"row", {:rgb, 0x1D1F24}}], unknown: []} =
+             GPUI.Tailwind.normalize("group-hover/row:bg-[#1d1f24]")
+
+    assert %{style: [group_hover_background: {"group", {:rgba, 0xFF000080}}], unknown: []} =
+             GPUI.Tailwind.normalize("group-hover:bg-[#ff0000]/50")
+
+    assert %{unknown: ["group-hover/Row:bg-red-500", "group-hover/row:bg-invalid"]} =
+             GPUI.Tailwind.normalize("group-hover/Row:bg-red-500 group-hover/row:bg-invalid")
+  end
+
+  test "named hover groups retain dynamic names as strings" do
+    name = "dynamic-#{System.unique_integer([:positive])}"
+
+    assert %{style: style, unknown: []} =
+             GPUI.Tailwind.normalize("group/#{name} group-hover/#{name}:visible")
+
+    assert style[:group] == name
+    assert style[:group_hover_visible] == name
+    assert_raise ArgumentError, fn -> String.to_existing_atom(name) end
   end
 end

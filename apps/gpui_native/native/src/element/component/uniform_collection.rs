@@ -4,6 +4,15 @@ use crate::element::component_registry::ComponentRegistry;
 use crate::{gpui, NativeTextInput};
 use std::collections::HashMap;
 use std::ops::Range;
+use std::sync::{Arc, Mutex};
+
+#[derive(Default)]
+pub(crate) struct TreeNavigation {
+    pub(crate) focused: Option<String>,
+    pub(crate) selected: Option<String>,
+    pub(crate) keyboard: bool,
+    pub(crate) group: super::tree_selection::TreeSelection,
+}
 
 pub(crate) struct ComponentUniformCollection {
     pub(crate) scroll_handle: gpui::UniformListScrollHandle,
@@ -15,6 +24,7 @@ pub(crate) struct ComponentUniformCollection {
     pub(crate) input_entities: HashMap<String, gpui::Entity<NativeTextInput>>,
     pub(crate) terminal_entities: HashMap<String, gpui::Entity<super::terminal::Terminal>>,
     pub(crate) components: ComponentRegistry,
+    pub(crate) tree_navigation: Arc<Mutex<TreeNavigation>>,
 }
 
 impl ComponentUniformCollection {
@@ -29,6 +39,7 @@ impl ComponentUniformCollection {
             input_entities: HashMap::new(),
             terminal_entities: HashMap::new(),
             components: ComponentRegistry::default(),
+            tree_navigation: Arc::default(),
         }
     }
 

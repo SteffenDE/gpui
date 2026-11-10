@@ -20,6 +20,11 @@ defmodule GPUI.WindowSpec do
           min_size: {pos_integer(), pos_integer()} | nil,
           resizable: boolean(),
           chrome: chrome(),
+          appearance_events: boolean(),
+          geometry_events: boolean(),
+          center_in_work_area: boolean(),
+          restore_bounds: {number(), number(), number(), number()} | nil,
+          cascade_offset: non_neg_integer(),
           root: root() | nil,
           commands: [GPUI.Command.t()]
         }
@@ -34,6 +39,11 @@ defmodule GPUI.WindowSpec do
     :root,
     resizable: true,
     chrome: :system,
+    restore_bounds: nil,
+    cascade_offset: 0,
+    geometry_events: false,
+    center_in_work_area: false,
+    appearance_events: false,
     commands: []
   ]
 
@@ -90,6 +100,25 @@ defmodule GPUI.WindowSpec do
       raise ArgumentError, "window root must contain a module and map or keyword assigns"
     end
 
+    unless is_boolean(window.appearance_events),
+      do: raise(ArgumentError, "window appearance_events must be a boolean")
+
+    unless valid_bounds?(window.restore_bounds),
+      do:
+        raise(
+          ArgumentError,
+          "window restore_bounds must contain finite x, y, width and height with positive size"
+        )
+
+    unless is_integer(window.cascade_offset) and window.cascade_offset >= 0,
+      do: raise(ArgumentError, "window cascade_offset must be a nonnegative integer")
+
+    unless is_boolean(window.geometry_events),
+      do: raise(ArgumentError, "window geometry_events must be a boolean")
+
+    unless is_boolean(window.center_in_work_area),
+      do: raise(ArgumentError, "window center_in_work_area must be a boolean")
+
     GPUI.Command.validate_all!(commands)
 
     if match?({_, _}, root) do
@@ -102,6 +131,14 @@ defmodule GPUI.WindowSpec do
 
     window
   end
+
+  defp valid_bounds?(nil), do: true
+
+  defp valid_bounds?({x, y, width, height})
+       when is_number(x) and is_number(y) and is_number(width) and is_number(height),
+       do: width > 0 and height > 0 and Enum.all?([x, y, width, height], &(abs(&1) < 1.0e9))
+
+  defp valid_bounds?(_), do: false
 
   defp validate_title!(title) when is_binary(title) and byte_size(title) <= @max_title_bytes,
     do: :ok

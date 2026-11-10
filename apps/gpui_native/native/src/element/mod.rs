@@ -5,12 +5,24 @@ pub(crate) mod component;
 pub(crate) mod component_registry;
 #[cfg(feature = "components")]
 pub(crate) mod controlled;
+#[cfg(feature = "real-gpui")]
+mod elided_text;
 pub(crate) mod event;
+#[cfg(feature = "real-gpui")]
+pub(crate) mod scroll;
+#[cfg(feature = "real-gpui")]
+mod tracked_text;
 
 use event::{apply_click_event, apply_input_events};
 
 #[cfg(feature = "real-gpui")]
 pub(crate) struct ElementRenderContext<'a, 'cx> {
+    pub(crate) pointer_observers: event::PointerObservers,
+    pub(crate) scrolls: scroll::Scrolls,
+    #[cfg(feature = "components")]
+    pub(crate) horizontal_groups: component::horizontal::Groups,
+    #[cfg(feature = "components")]
+    pub(crate) tooltip_focus_owner: Option<gpui::FocusHandle>,
     pub(crate) runtime: SharedRuntime,
     pub(crate) window_id: u64,
     pub(crate) next_element_id: usize,
@@ -43,9 +55,29 @@ impl ElementNode {
             id: None,
             accessibility: AccessibilitySemantics::default(),
             children: Vec::new(),
+            pointer: None,
+            pointer_position: None,
+            pointer_down: None,
+            window_pointer_position: None,
+            window_pointer_up: None,
+            clipboard_write: None,
+            clipboard_text: None,
+            clipboard_write_request: 0,
+            clipboard_without_primary: false,
             click: None,
             bounds_change: None,
+            scrollbar: false,
+            scroll_top: 0.0,
+            scroll_left: 0.0,
+            scroll_horizontal: false,
+            scroll_request: 0,
+            scroll_event: None,
+            keycapture: None,
+            window_keyrelease: None,
+            capture_keys: Vec::new(),
+            keyrelease: None,
             focus_request: 0,
+            tab_stop: true,
             focus: None,
             blur: None,
             motion_request: 0,
@@ -56,6 +88,11 @@ impl ElementNode {
             motion_from_opacity: 1.0,
             motion_from_x: 0.0,
             motion_from_y: 0.0,
+            motion_to_opacity: 1.0,
+            motion_to_x: 0.0,
+            motion_to_y: 0.0,
+            motion_repeat: false,
+            motion_alternate: false,
             window_control: None,
         })
     }
@@ -65,7 +102,39 @@ impl ElementNode {
 
         match self {
             Self::Viewport(node) => render_viewport_primitive(node.children, context),
-            Self::Text(node) => render_text_primitive(node.text, node.style),
+            Self::Text(node) => render_text_primitive(
+                node.text,
+                node.style,
+                node.truncate_start,
+                format!("{}-text-{element_id}", context.id_namespace),
+            ),
+            Self::Svg(node) => {
+                use gpui::{Animation, AnimationExt, IntoElement, ParentElement, Styled};
+                use std::time::Duration;
+                let svg = gpui::svg().data(node.data.as_bytes()).size_full();
+                let svg = if node.spin_duration > 0 {
+                    let id = format!(
+                        "{}-spin-{}",
+                        context.id_namespace,
+                        node.id.unwrap_or_else(|| element_id.to_string())
+                    );
+                    svg.with_animation(
+                        id,
+                        Animation::new(Duration::from_millis(node.spin_duration)).repeat(),
+                        |svg, delta| {
+                            svg.with_transformation(gpui::Transformation::rotate(gpui::radians(
+                                delta * std::f32::consts::TAU,
+                            )))
+                        },
+                    )
+                    .into_any_element()
+                } else {
+                    svg.into_any_element()
+                };
+                apply_generated_render_styles(gpui::div(), node.style)
+                    .child(svg)
+                    .into_any_element()
+            }
             Self::Image(node) => render_image_primitive(
                 node.image,
                 node.style,
@@ -319,12 +388,40 @@ pub(crate) fn render_viewport_primitive(
 }
 
 #[cfg(feature = "real-gpui")]
-pub(crate) fn render_text_primitive(text: String, style: StyleAttrs) -> gpui::AnyElement {
-    use gpui::{div, IntoElement, ParentElement};
-
-    apply_generated_render_styles(div(), style)
-        .child(text)
-        .into_any_element()
+pub(crate) fn render_text_primitive(
+    text: String,
+    style: StyleAttrs,
+    truncate_start: bool,
+    id: String,
+) -> gpui::AnyElement {
+    use gpui::{
+        div, InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement, Styled,
+    };
+    let precise = style.preserve_layout_bounds
+        && (style.white_space.as_deref() == Some("nowrap") || style.truncate)
+        && !text.contains('\n')
+        && !text.contains('\r');
+    let elide_end = style.truncate || style.text_overflow.as_deref() == Some("ellipsis");
+    let element = apply_generated_render_styles(div(), style);
+    if truncate_start {
+        element
+            .id(id)
+            .role(gpui::Role::Label)
+            .aria_label(text.clone())
+            .overflow_hidden()
+            .child(elided_text::ElidedText::new(text))
+            .into_any_element()
+    } else if precise && elide_end {
+        element
+            .child(elided_text::ElidedText::end(text))
+            .into_any_element()
+    } else if precise {
+        element
+            .child(tracked_text::TrackedText::new(text, 0.0))
+            .into_any_element()
+    } else {
+        element.child(text).into_any_element()
+    }
 }
 
 #[cfg(feature = "real-gpui")]
@@ -374,11 +471,29 @@ pub(crate) fn render_image_primitive(
     // out at its raster pixel dimensions (for example, a 2x icon atlas).
     let width = raster.width;
     let height = raster.height;
+    // A Div clips descendant images to a rectangular content mask. Radius
+    // must also reach the image primitive, which paints rounded sprite corners.
+    let mut image = raster.render();
+    if let Some(radius) = style.border_radius {
+        image = image.rounded(gpui::px(radius));
+    }
+    if let Some(radius) = style.border_top_left_radius {
+        image = image.rounded_tl(gpui::px(radius));
+    }
+    if let Some(radius) = style.border_top_right_radius {
+        image = image.rounded_tr(gpui::px(radius));
+    }
+    if let Some(radius) = style.border_bottom_right_radius {
+        image = image.rounded_br(gpui::px(radius));
+    }
+    if let Some(radius) = style.border_bottom_left_radius {
+        image = image.rounded_bl(gpui::px(radius));
+    }
     let mut element = apply_generated_render_styles(
         div().w(gpui::px(width as f32)).h(gpui::px(height as f32)),
         style,
     )
-    .child(raster.render())
+    .child(image)
     .id(element_id);
     if let Some(label) = label {
         element = element.role(Role::Image).aria_label(label);
@@ -501,17 +616,25 @@ pub(crate) fn render_input_primitive(
         id: stable_id,
         value,
         placeholder,
+        capture_keys,
         focus_request,
+        select_all_request,
         change,
         keydown,
         keyup,
+        keystroke,
+        keyrelease,
         focus,
         blur,
     } = input_node;
     let runtime = context.runtime.clone();
     let window_id = context.window_id;
+    let identity = stable_id
+        .as_ref()
+        .map(|id| format!("id-{id}"))
+        .unwrap_or_else(|| format!("index-{element_id}"));
     let input_id = format!(
-        "gpui-elixir-input-{window_id}-{}-{element_id}",
+        "gpui-elixir-input-{window_id}-{}-{identity}",
         context.id_namespace
     );
     let focus_enabled = focus_request > 0 || focus.is_some() || blur.is_some();
@@ -525,6 +648,7 @@ pub(crate) fn render_input_primitive(
         }
     }
     context.active_input_ids.insert(input_id.clone());
+    let input_created = !context.input_entities.contains_key(&input_id);
     let input = if let Some(input) = context.input_entities.get(&input_id).cloned() {
         context.cx.update_entity(&input, |input, _cx| {
             input.update_props(value.clone(), placeholder.clone(), change.clone());
@@ -548,13 +672,18 @@ pub(crate) fn render_input_primitive(
         input
     };
 
+    context.cx.update_entity(&input, |input, _cx| {
+        input.set_key_capture(capture_keys, keydown.clone(), keystroke.clone());
+        input.request_select_all(select_all_request);
+    });
+
     let focus_handle = input.read(context.cx).native_focus_handle();
     let install = if focus_enabled {
         runtime
             .focus_observers
             .lock()
-            .map(|mut observers| observers.insert((window_id, public_id.clone())))
-            .unwrap_or(false)
+            .map(|mut observers| observers.insert((window_id, public_id.clone())) || input_created)
+            .unwrap_or(input_created)
     } else {
         false
     };
@@ -569,6 +698,9 @@ pub(crate) fn render_input_primitive(
         );
     }
     if focus_enabled {
+        if let Ok(mut handles) = runtime.focus_handles.lock() {
+            handles.insert((window_id, public_id.clone()), focus_handle.clone());
+        }
         request_native_focus(
             &focus_handle,
             public_id,
@@ -580,7 +712,15 @@ pub(crate) fn render_input_primitive(
     }
 
     let element = apply_generated_render_styles(div(), style).child(input);
-    apply_input_events(element, input_id, keydown, keyup, runtime, window_id)
+    apply_input_events(
+        element,
+        input_id,
+        keydown,
+        keyup,
+        (keystroke, keyrelease),
+        runtime,
+        window_id,
+    )
 }
 
 #[cfg(feature = "real-gpui")]
@@ -594,6 +734,11 @@ pub(crate) struct ContainerMotion {
     from_opacity: f64,
     from_x: f64,
     from_y: f64,
+    to_opacity: f64,
+    to_x: f64,
+    to_y: f64,
+    repeat: bool,
+    alternate: bool,
 }
 
 impl<E: gpui::IntoElement + 'static> gpui::IntoElement for MotionElement<E> {
@@ -704,21 +849,34 @@ fn apply_container_motion(
     let animation = Animation::new(Duration::from_millis(total_ms)).with_easing(move |delta| {
         let elapsed_ms = delta * total_ms as f32;
         let progress = ((elapsed_ms - delay_ms as f32) / duration_ms as f32).clamp(0.0, 1.0);
+        let progress = if motion.alternate {
+            1.0 - (2.0 * progress - 1.0).abs()
+        } else {
+            progress
+        };
         motion_easing(&easing, progress)
     });
+    let animation = if motion.repeat {
+        animation.repeat()
+    } else {
+        animation
+    };
     let from_opacity = motion.from_opacity;
     let from_x = motion.from_x;
     let from_y = motion.from_y;
 
     MotionElement {
-        animation: element
-            .relative()
-            .with_animation(id, animation, move |element, delta| {
-                element
-                    .opacity(lerp(from_opacity as f32, 1.0, delta))
-                    .left(gpui::px(lerp(from_x as f32, 0.0, delta)))
-                    .top(gpui::px(lerp(from_y as f32, 0.0, delta)))
-            }),
+        animation: element.with_animation(id, animation, move |element, delta| {
+            let mut element =
+                element.opacity(lerp(from_opacity as f32, motion.to_opacity as f32, delta));
+            if from_x != 0.0 || motion.to_x != 0.0 {
+                element = element.left(gpui::px(lerp(from_x as f32, motion.to_x as f32, delta)));
+            }
+            if from_y != 0.0 || motion.to_y != 0.0 {
+                element = element.top(gpui::px(lerp(from_y as f32, motion.to_y as f32, delta)));
+            }
+            element
+        }),
         accessibility,
         actions,
     }
@@ -826,8 +984,28 @@ pub(crate) fn render_container_primitive(
         accessibility,
         children,
         click,
+        pointer,
+        pointer_position,
+        pointer_down,
+        window_pointer_position: _,
+        window_pointer_up: _,
+        clipboard_write,
+        clipboard_text,
+        clipboard_write_request,
+        clipboard_without_primary,
         bounds_change,
+        scrollbar,
+        scroll_top,
+        scroll_left,
+        scroll_horizontal,
+        scroll_request,
+        scroll_event,
+        keyrelease,
+        keycapture: _,
+        window_keyrelease: _,
+        capture_keys: _,
         focus_request,
+        tab_stop,
         focus,
         blur,
         motion_request,
@@ -838,14 +1016,37 @@ pub(crate) fn render_container_primitive(
         motion_from_opacity,
         motion_from_x,
         motion_from_y,
+        motion_to_opacity,
+        motion_to_x,
+        motion_to_y,
+        motion_repeat,
+        motion_alternate,
         window_control,
     } = node;
     let runtime = context.runtime.clone();
     let window_id = context.window_id;
-    let mut element = apply_generated_render_styles(div(), style);
-    element = apply_container_semantics(element, tag);
+    let scroll_foreground = style
+        .color
+        .map(gpui::rgba)
+        .unwrap_or_else(|| context.window.text_style().color.into());
+    let focus_border =
+        style.focus_outline_color.is_none() && style.focus_outline_width != Some(0.0);
+    let outline_tab_only = style.focus_outline_mode.as_deref() == Some("tab");
+    let outline = style.focus_outline_color.map(|color| {
+        (
+            color,
+            style.focus_outline_width.unwrap_or(2.0).max(0.0),
+            style.focus_outline_offset.unwrap_or(1.0),
+            style.focus_outline_radius.unwrap_or(0.0).max(0.0),
+        )
+    });
+    let element = apply_container_semantics(div(), tag);
+    let mut element = apply_generated_render_styles(element, style);
 
-    if let Some(event) = bounds_change {
+    if let Some(event) = bounds_change
+        .clone()
+        .filter(|_| tag != GeneratedElementTag::Scroll)
+    {
         use gpui::Styled;
 
         let id = stable_id
@@ -854,39 +1055,7 @@ pub(crate) fn render_container_primitive(
         let runtime_for_bounds = runtime.clone();
         let observer = gpui::canvas(
             move |bounds, _window, _cx| {
-                let value = crate::event::ElementBoundsGeometry {
-                    id: id.clone(),
-                    x: f32::from(bounds.origin.x) as f64,
-                    y: f32::from(bounds.origin.y) as f64,
-                    width: f32::from(bounds.size.width) as f64,
-                    height: f32::from(bounds.size.height) as f64,
-                    coordinate_space: "window_native_pixels".to_string(),
-                };
-                let changed = runtime_for_bounds
-                    .element_bounds
-                    .lock()
-                    .map(|mut known| {
-                        let key = (window_id, id.clone());
-                        if known.get(&key) == Some(&value)
-                            || (known.len() >= 256 && !known.contains_key(&key))
-                        {
-                            false
-                        } else {
-                            known.insert(key, value.clone());
-                            true
-                        }
-                    })
-                    .unwrap_or(false);
-                if changed {
-                    let _ = push_event(
-                        &runtime_for_bounds,
-                        NativeEvent::Bounds {
-                            window_id,
-                            event: event.clone(),
-                            value,
-                        },
-                    );
-                }
+                event::emit_bounds(&runtime_for_bounds, window_id, &id, &event, bounds);
             },
             |_bounds, _prepaint, _window, _cx| {},
         )
@@ -894,6 +1063,43 @@ pub(crate) fn render_container_primitive(
         .inset_0();
         element = element.child(observer);
     }
+
+    if let Some(event) = pointer {
+        let id = stable_id
+            .clone()
+            .unwrap_or_else(|| format!("{}-{element_id}", context.id_namespace));
+        element = event::apply_pointer_observer(element, id, event, context);
+    }
+
+    if let Some(event) = pointer_position {
+        let runtime = runtime.clone();
+        element = element.on_mouse_move(move |mouse, _window, _cx| {
+            event::emit_pointer_position(&runtime, window_id, &event, mouse.position);
+        });
+    }
+
+    let captures_pointer = pointer_down.is_some() && !accessibility.disabled;
+    if let Some(event) = pointer_down.filter(|_| !accessibility.disabled) {
+        let runtime = runtime.clone();
+        element = element.on_mouse_down(gpui::MouseButton::Left, move |mouse, window, cx| {
+            event::emit_pointer_position(&runtime, window_id, &event, mouse.position);
+            window.prevent_default();
+            cx.stop_propagation();
+        });
+    }
+
+    let clipboard = (clipboard_write, clipboard_text, clipboard_without_primary);
+    if clipboard_write_request > 0 {
+        let id = stable_id
+            .as_deref()
+            .expect("clipboard requests require a stable ID");
+        event::apply_clipboard_request(id, clipboard_write_request, &clipboard, context);
+    }
+    let clipboard = if clipboard_write_request > 0 {
+        (None, None, false)
+    } else {
+        clipboard
+    };
 
     for child in children {
         element = element.child(child.render(context));
@@ -909,18 +1115,104 @@ pub(crate) fn render_container_primitive(
         from_opacity: motion_from_opacity,
         from_x: motion_from_x,
         from_y: motion_from_y,
+        to_opacity: motion_to_opacity,
+        to_x: motion_to_x,
+        to_y: motion_to_y,
+        repeat: motion_repeat,
+        alternate: motion_alternate,
     };
 
     let mut accessibility = accessibility;
-    if tag == GeneratedElementTag::Button {
+    if tag == GeneratedElementTag::Button && accessibility.role.is_none() {
         accessibility.role = Some(AccessibilityRole::Button);
     }
 
-    if focus_request > 0 || focus.is_some() || blur.is_some() {
-        let id = stable_id
-            .clone()
-            .expect("focus-enabled containers require stable IDs");
-        element = apply_focus_contract(element, id, focus_request, focus, blur, true, context);
+    let explicit_focus =
+        focus_request > 0 || focus.is_some() || blur.is_some() || keyrelease.is_some();
+    #[cfg(feature = "components")]
+    let inherited_focus = context.tooltip_focus_owner.clone();
+    #[cfg(not(feature = "components"))]
+    let inherited_focus: Option<gpui::FocusHandle> = None;
+    let outlined_control = outline.is_some()
+        && !accessibility.disabled
+        && (tag == GeneratedElementTag::Button
+            || accessibility
+                .role
+                .as_ref()
+                .is_some_and(AccessibilityRole::is_activatable));
+    let needs_focus = explicit_focus || (outlined_control && inherited_focus.is_none());
+    let focus_id = stable_id
+        .clone()
+        .unwrap_or_else(|| format!("{}-{element_id}", context.id_namespace));
+    if needs_focus {
+        element = apply_focus_contract(
+            element,
+            focus_id.clone(),
+            focus_request,
+            focus,
+            blur,
+            tab_stop,
+            context,
+        );
+    }
+    let handle = if needs_focus {
+        context
+            .runtime
+            .focus_handles
+            .lock()
+            .ok()
+            .and_then(|handles| handles.get(&(window_id, focus_id.clone())).cloned())
+    } else {
+        inherited_focus
+    };
+    if let Some((color, width, offset, radius)) = outline {
+        use gpui::Styled;
+        element = element.child(
+            gpui::canvas(
+                |_, _, _| {},
+                move |bounds, _, window, _| {
+                    if width > 0.0
+                        && (if outline_tab_only {
+                            window.tab_navigation_focus_visible()
+                        } else {
+                            window.last_input_was_keyboard()
+                        })
+                        && handle
+                            .as_ref()
+                            .is_some_and(|handle| handle.is_focused(window))
+                    {
+                        let outer = bounds.dilate(gpui::px(width + offset));
+                        window.paint_quad(
+                            gpui::outline(outer, gpui::rgba(color), gpui::BorderStyle::Solid)
+                                .border_widths(gpui::px(width))
+                                .corner_radii(gpui::px(radius + width + offset)),
+                        );
+                    }
+                },
+            )
+            .absolute()
+            .inset_0(),
+        );
+    }
+    if explicit_focus {
+        let id = focus_id;
+        if let Some(event) = keyrelease {
+            let handle = context
+                .runtime
+                .focus_handles
+                .lock()
+                .ok()
+                .and_then(|handles| handles.get(&(window_id, id)).cloned());
+            let runtime = runtime.clone();
+            element = element.on_key_up(move |key, window, _cx| {
+                if handle
+                    .as_ref()
+                    .is_some_and(|handle| handle.is_focused(window))
+                {
+                    event::emit_structured_key(&runtime, window_id, &event, &key.keystroke, false);
+                }
+            });
+        }
     }
 
     if tag == GeneratedElementTag::Scroll {
@@ -930,7 +1222,33 @@ pub(crate) fn render_container_primitive(
                 context.id_namespace
             )
         });
-        let element = element.id(scroll_id.clone()).overflow_y_scroll();
+        let test_id = scroll_id.clone();
+        let element = element
+            .id(scroll_id.clone())
+            .debug_selector(|| test_id.clone());
+        let element = if scroll_horizontal {
+            element.overflow_x_scroll()
+        } else {
+            element.overflow_y_scroll()
+        };
+        let element = scroll::apply(
+            element,
+            &scroll_id,
+            scroll::ScrollOptions {
+                position: if scroll_horizontal {
+                    scroll_left
+                } else {
+                    scroll_top
+                },
+                horizontal: scroll_horizontal,
+                request: scroll_request,
+                event: scroll_event,
+                bounds_event: bounds_change,
+                scrollbar,
+                foreground: scroll_foreground.into(),
+            },
+            context,
+        );
         let element = apply_window_control(element, window_control, runtime.clone(), window_id);
         let element = if let Some(event) = click {
             let runtime_for_click = runtime.clone();
@@ -959,7 +1277,44 @@ pub(crate) fn render_container_primitive(
             runtime,
             window_id,
             element_motion,
+            tab_stop,
             window_control,
+            clipboard,
+            captures_pointer,
+            focus_border,
         )
+    }
+}
+
+#[cfg(all(test, feature = "real-gpui"))]
+mod decoration_style_tests {
+    use crate::{gpui, StyleAttrs};
+    use gpui::Styled;
+
+    #[test]
+    fn css_shadow_units_and_layer_order_preserve_the_outside_ring() {
+        let mut element = crate::apply_generated_render_styles(
+            gpui::div(),
+            StyleAttrs {
+                box_shadow: Some(vec![
+                    (0., 4., 6., -1., 0xFF000080),
+                    (0., 2., 4., -2., 0x0000FF80),
+                ]),
+                ring_width: Some(1.),
+                ring_color: Some(0xD7DBE11A),
+                ..Default::default()
+            },
+        );
+        let style = element.style();
+        let layers = style.box_shadow.as_ref().unwrap();
+        assert_eq!(layers.len(), 2);
+        assert_eq!(layers[0].blur_radius, gpui::px(2.));
+        assert_eq!(layers[1].blur_radius, gpui::px(3.));
+        assert_eq!(layers[0].spread_radius, gpui::px(-2.));
+        assert_eq!(layers[1].offset.y, gpui::px(4.));
+        assert_eq!(layers[0].color, gpui::rgba(0x0000FF80).into());
+        assert_eq!(layers[1].color, gpui::rgba(0xFF000080).into());
+        assert_eq!(style.outer_ring_width, Some(gpui::px(1.)));
+        assert_eq!(style.outer_ring_color, Some(gpui::rgba(0xD7DBE11A).into()));
     }
 }

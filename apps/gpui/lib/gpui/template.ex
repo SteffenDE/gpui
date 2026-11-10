@@ -168,8 +168,9 @@ defmodule GPUI.Template do
     end
   end
 
-  defp component_builder("ui_" <> name) when name in ~w(popover tooltip dialog dropdown_menu context_menu menu_button),
-    do: "<GPUI.UI.Overlay.#{name}>"
+  defp component_builder("ui_" <> name)
+       when name in ~w(popover tooltip dialog dropdown_menu context_menu menu_button),
+       do: "<GPUI.UI.Overlay.#{name}>"
 
   defp component_builder("ui_" <> name)
        when name in ~w(popover_trigger popover_content tooltip_trigger dialog_trigger dialog_content dropdown_menu_trigger dropdown_menu_item),
@@ -244,10 +245,10 @@ defmodule GPUI.Template do
   defp put_style_attr(attrs, style) do
     case Keyword.fetch(attrs, :style) do
       :error ->
-        Keyword.put(attrs, :style, style)
+        Keyword.put(attrs, :style, Macro.escape(style))
 
       {:ok, existing} when is_list(existing) ->
-        Keyword.put(attrs, :style, Keyword.merge(existing, style))
+        Keyword.put(attrs, :style, Keyword.merge(existing, Macro.escape(style)))
 
       {:ok, existing} ->
         merged =

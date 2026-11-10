@@ -5,12 +5,33 @@ use super::render_component_fallback;
 use crate::{gpui, ButtonComponentNode, CheckboxComponentNode, ElementRenderContext};
 
 #[cfg(feature = "components")]
+#[derive(gpui::IntoElement)]
+struct AccessibleButton(gpui_component::button::Button);
+
+#[cfg(feature = "components")]
+impl gpui::InteractiveElement for AccessibleButton {
+    fn interactivity(&mut self) -> &mut gpui::Interactivity {
+        gpui::InteractiveElement::interactivity(&mut self.0)
+    }
+}
+
+#[cfg(feature = "components")]
+impl gpui::StatefulInteractiveElement for AccessibleButton {}
+
+#[cfg(feature = "components")]
+impl gpui::RenderOnce for AccessibleButton {
+    fn render(self, window: &mut gpui::Window, cx: &mut gpui::App) -> impl gpui::IntoElement {
+        gpui::RenderOnce::render(self.0, window, cx)
+    }
+}
+
+#[cfg(feature = "components")]
 pub(crate) fn render_button_component(
     node: ButtonComponentNode,
     context: &mut ElementRenderContext<'_, '_>,
 ) -> gpui::AnyElement {
     use crate::{push_event, NativeEvent};
-    use gpui::{InteractiveElement, IntoElement, ParentElement};
+    use gpui::{InteractiveElement, IntoElement, ParentElement, StatefulInteractiveElement};
     use gpui_component::{
         button::{Button, ButtonVariants},
         Disableable, Selectable, Sizable,
@@ -27,6 +48,7 @@ pub(crate) fn render_button_component(
         .file_prompt
         .filter(|prompt| !prompt.is_empty())
         .unwrap_or_else(|| "Choose a file".to_string());
+    let file_multiple = node.file_multiple;
     let file_max_bytes = node.file_max_bytes.min(25 * 1_024 * 1_024) as usize;
     let test_id = node.id.clone();
     let mut button = Button::new(node.id);
@@ -62,7 +84,10 @@ pub(crate) fn render_button_component(
     if node.compact {
         button = button.compact();
     }
-    button = button.label(node.label);
+    let accessible_label = node.label.clone();
+    if node.show_label {
+        button = button.label(node.label);
+    }
     for child in node.children {
         button = button.child(child.render(context));
     }
@@ -71,7 +96,7 @@ pub(crate) fn render_button_component(
         || clipboard_write_event.is_some()
         || file_event.is_some()
     {
-        button = button.on_click(move |_click, window, cx| {
+        button = button.on_click(move |click, window, cx| {
             if let Some(event) = clipboard_write_event.as_ref() {
                 if let Some(text) = clipboard_text.as_ref() {
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.clone()));
@@ -103,7 +128,7 @@ pub(crate) fn render_button_component(
             if let Some(event) = file_event.as_ref() {
                 super::display::start_file_read(
                     event.clone(),
-                    file_prompt.clone(),
+                    (file_prompt.clone(), file_multiple),
                     file_max_bytes,
                     runtime.clone(),
                     window_id,
@@ -112,20 +137,19 @@ pub(crate) fn render_button_component(
                 );
             }
             if let Some(event) = click_event.as_ref() {
-                let _ = push_event(
+                crate::element::event::emit_pointer_click(
                     &runtime,
-                    NativeEvent::Click {
-                        window_id,
-                        event: event.clone(),
-                    },
+                    window_id,
+                    event,
+                    click.modifiers(),
                 );
             }
         });
     }
 
-    let element = gpui::div()
-        .id(format!("{}-display-action", test_id))
-        .child(apply_component_styles(button, node.style));
+    let element = gpui::div().id(format!("{}-display-action", test_id)).child(
+        AccessibleButton(apply_component_styles(button, node.style)).aria_label(accessible_label),
+    );
     crate::element::register_test_target(element, test_id, None, context).into_any_element()
 }
 

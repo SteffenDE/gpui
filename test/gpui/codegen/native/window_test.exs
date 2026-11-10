@@ -48,7 +48,7 @@ defmodule GPUI.Codegen.Native.WindowTest do
     assert source =~ "frame_token_impl(env, runtime, close_request(window_id))"
     assert source =~ "frame_after_request(window_id, generation, timeout_ms)"
     assert source =~ "set_theme_impl(env, runtime, mode)"
-    assert source =~ "decode_element_node(request.tree)"
+    assert source =~ "decode_tree(request.tree)"
   end
 
   test "keeps malformed tree rejection in the generated element decoder" do

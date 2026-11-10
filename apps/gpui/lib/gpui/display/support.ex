@@ -30,6 +30,32 @@ defmodule GPUI.Display.Support do
     end
   end
 
+  @doc "Applies an optional native theme capability."
+  def set_theme(module, display, mode) do
+    if function_exported?(module, :set_theme, 2) do
+      case invoke(module, :set_theme, [display, mode]) do
+        :ok -> :ok
+        {:error, _} = error -> error
+        invalid -> {:error, {:invalid_display_return, :set_theme, invalid}}
+      end
+    else
+      {:error, :theme_not_supported}
+    end
+  end
+
+  @doc "Activates a native window when supported by the display."
+  def activate_window(module, display, window_id) do
+    if function_exported?(module, :activate_window, 2) do
+      case invoke(module, :activate_window, [display, window_id]) do
+        :ok -> :ok
+        {:error, _} = error -> error
+        invalid -> {:error, {:invalid_display_return, :activate_window, invalid}}
+      end
+    else
+      {:error, :activation_not_supported}
+    end
+  end
+
   @doc "Drains pending native or test events from a display module."
   @spec drain(module(), GenServer.server()) :: {:ok, [event()]} | {:error, term()}
   def drain(display_module, display) do

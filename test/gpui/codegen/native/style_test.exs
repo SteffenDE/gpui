@@ -49,6 +49,7 @@ defmodule GPUI.Codegen.Native.StyleTest do
     assert source =~ "gpui::FontWeight::BOLD"
     assert source =~ "element = element.border_color(gpui::rgba(value));"
     assert source =~ "element = element.flex_basis(value);"
+    assert source =~ "element = element.font_family(value);"
     assert source =~ "element = element.truncate();"
     assert source =~ "element = element.cursor_pointer();"
     assert source =~ "element = element.relative();"

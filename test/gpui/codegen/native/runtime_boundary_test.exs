@@ -5,7 +5,15 @@ defmodule GPUI.Codegen.Native.RuntimeBoundaryTest do
   alias RustQ.Meta.AST, as: MetaAST
   alias RustQ.Rust.AST
 
-  for {name, arity} <- [start_runtime: 0, stop_runtime: 1] do
+  for {name, arity} <- [
+        start_runtime: 0,
+        stop_runtime: 1,
+        system_notification_status: 0,
+        request_system_notifications: 0,
+        show_system_notification: 5,
+        dismiss_system_notification: 1,
+        subscribe_system_notifications: 0
+      ] do
     test "exports #{name}/#{arity} as a dirty-I/O runtime boundary" do
       name = unquote(name)
       arity = unquote(arity)

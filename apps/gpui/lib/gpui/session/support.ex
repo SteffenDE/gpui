@@ -31,9 +31,18 @@ defmodule GPUI.Session.Support do
       title: window.title,
       size: Tuple.to_list(window.size || {800, 600}),
       min_size: encode_optional_size(window.min_size),
+      restore_bounds:
+        if(window.restore_bounds,
+          do: window.restore_bounds |> Tuple.to_list() |> Enum.map(&:erlang.float/1)
+        ),
+      cascade_offset: window.cascade_offset,
+      center_in_work_area: window.center_in_work_area,
       resizable: window.resizable,
       chrome: window.chrome,
-      lifecycle: window_lifecycle(window.root),
+      lifecycle:
+        window_lifecycle(window.root) ++
+          if(window.appearance_events, do: [:appearance], else: []) ++
+          if(window.geometry_events, do: [:geometry], else: []),
       commands: Enum.map(window.commands, &GPUI.Command.to_payload/1),
       root: encode_root(window.root)
     }

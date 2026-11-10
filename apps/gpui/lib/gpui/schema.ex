@@ -178,6 +178,23 @@ defmodule GPUI.Schema do
       render:
         {:enum_methods, [{"left", :text_left}, {"center", :text_center}, {"right", :text_right}]}
     },
+    %Style{
+      name: :preserve_layout_bounds,
+      field: :preserve_layout_bounds,
+      type: :boolean,
+      render: {:if_true, :preserve_layout_bounds}
+    },
+    %Style{
+      name: :paint_rounding,
+      field: :paint_rounding,
+      type: :atom_string,
+      render:
+        {:enum_methods,
+         [
+           {"half_up", :paint_rounding_half_up},
+           {"half_toward_zero", :paint_rounding_half_toward_zero}
+         ]}
+    },
     %Style{name: :truncate, field: :truncate, type: {:atom_eq, true}, render: :truncate_if_true},
     %Style{
       name: :cursor,
@@ -204,6 +221,18 @@ defmodule GPUI.Schema do
       field: :color,
       type: :color,
       render: {:option_method, :text_color, :color}
+    },
+    %Style{
+      name: :text_decoration,
+      field: :text_decoration,
+      type: :atom_string,
+      render: {:enum_methods, [{"underline", :underline}]}
+    },
+    %Style{
+      name: :font_family,
+      field: :font_family,
+      type: :atom_string,
+      render: {:option_method, :font_family, :string}
     },
     %Style{
       name: :font_size,
@@ -243,7 +272,13 @@ defmodule GPUI.Schema do
       type: :atom_string,
       render: {:enum_methods, [{"visible", :visible}, {"hidden", :invisible}]}
     },
-    %Style{name: :group, field: :group, type: :atom_string, render: :group},
+    %Style{name: :group, field: :group, type: :group_name, render: :group},
+    %Style{
+      name: :hover_color,
+      field: :hover_color,
+      type: :color,
+      render: {:hover, :text_color, :color}
+    },
     %Style{
       name: :hover_background,
       field: :hover_background,
@@ -251,15 +286,21 @@ defmodule GPUI.Schema do
       render: {:hover, :bg, :color}
     },
     %Style{
+      name: :group_hover_background,
+      field: :group_hover_background,
+      type: :group_color,
+      render: :group_hover_background
+    },
+    %Style{
       name: :group_hover_visible,
       field: :group_hover_visible,
-      type: :atom_string,
+      type: :group_name,
       render: :group_hover_visible
     },
     %Style{
       name: :group_hover_invisible,
       field: :group_hover_invisible,
-      type: :atom_string,
+      type: :group_name,
       render: :group_hover_invisible
     },
     %Style{name: :gap, field: :gap, type: :px, render: {:option_method, :gap, :px}},
@@ -345,11 +386,68 @@ defmodule GPUI.Schema do
       render: {:option_method, :rounded, :px}
     },
     %Style{
+      name: :border_top_left_radius,
+      field: :border_top_left_radius,
+      type: :radius,
+      render: {:option_method, :rounded_tl, :px}
+    },
+    %Style{
+      name: :border_top_right_radius,
+      field: :border_top_right_radius,
+      type: :radius,
+      render: {:option_method, :rounded_tr, :px}
+    },
+    %Style{
+      name: :border_bottom_right_radius,
+      field: :border_bottom_right_radius,
+      type: :radius,
+      render: {:option_method, :rounded_br, :px}
+    },
+    %Style{
+      name: :border_bottom_left_radius,
+      field: :border_bottom_left_radius,
+      type: :radius,
+      render: {:option_method, :rounded_bl, :px}
+    },
+    %Style{
       name: :border_width,
       field: :border_width,
       type: :px,
       render: {:option_method, :border, :px}
     },
+    %Style{
+      name: :border_top_width,
+      field: :border_top_width,
+      type: :px,
+      render: {:option_method, :border_t, :px}
+    },
+    %Style{
+      name: :border_right_width,
+      field: :border_right_width,
+      type: :px,
+      render: {:option_method, :border_r, :px}
+    },
+    %Style{
+      name: :border_bottom_width,
+      field: :border_bottom_width,
+      type: :px,
+      render: {:option_method, :border_b, :px}
+    },
+    %Style{
+      name: :border_left_width,
+      field: :border_left_width,
+      type: :px,
+      render: {:option_method, :border_l, :px}
+    },
+    %Style{name: :box_shadow, field: :box_shadow, type: :box_shadows, render: :box_shadows},
+    %Style{name: :ring_width, field: :ring_width, type: :px},
+    %Style{name: :ring_color, field: :ring_color, type: :color, render: :outer_ring},
+    %Style{name: :focus_outline_mode, field: :focus_outline_mode, type: :atom_string},
+    %Style{name: :focus_outline_color, field: :focus_outline_color, type: :color},
+    %Style{name: :selected_background, field: :selected_background, type: :color},
+    %Style{name: :focus_outline_width, field: :focus_outline_width, type: :px},
+    %Style{name: :focus_outline_offset, field: :focus_outline_offset, type: :px},
+    %Style{name: :focus_outline_radius, field: :focus_outline_radius, type: :radius},
     %Style{
       name: :border_color,
       field: :border_color,
@@ -531,6 +629,25 @@ defmodule GPUI.Schema do
 
     validate_motion_offset!(tag, :motion_from_x, x)
     validate_motion_offset!(tag, :motion_from_y, y)
+    validate_motion_offset!(tag, :motion_to_x, Map.get(assigns, :motion_to_x, 0.0))
+    validate_motion_offset!(tag, :motion_to_y, Map.get(assigns, :motion_to_y, 0.0))
+    target_opacity = Map.get(assigns, :motion_to_opacity, 1.0)
+
+    unless is_number(target_opacity) and target_opacity >= 0.0 and target_opacity <= 1.0 do
+      invalid_attr!(tag, :motion_to_opacity, "a number from 0.0 through 1.0", target_opacity)
+    end
+
+    assigns
+  end
+
+  defp validate_component_contract!(assigns, :svg) do
+    duration = Map.get(assigns, :spin_duration, 0)
+    validate_motion_bound!(:svg, :spin_duration, duration, 60_000)
+
+    if duration > 0 and not (is_binary(Map.get(assigns, :id)) and Map.get(assigns, :id) != "") do
+      raise ArgumentError, "svg with spin_duration requires a non-empty string id"
+    end
+
     assigns
   end
 
@@ -953,7 +1070,7 @@ defmodule GPUI.Schema do
   def identified_tags do
     for %Component{tag: tag, attrs: attrs} <- @components,
         Keyword.has_key?(attrs, :id),
-        tag not in [:div, :button, :span, :scroll, :list, :item, :text_input],
+        tag not in [:div, :button, :span, :scroll, :list, :item, :text_input, :svg],
         do: tag
   end
 

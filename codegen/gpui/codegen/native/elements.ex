@@ -24,6 +24,7 @@ defmodule GPUI.Codegen.Native.Elements do
         }
 
   @type viewport_node :: %{
+          required(:rem_size) => R.option(R.f64()),
           required(:children) => R.vec(ElementNode.t())
         }
 
@@ -33,9 +34,29 @@ defmodule GPUI.Codegen.Native.Elements do
           required(:id) => R.option(String.t()),
           required(:accessibility) => AccessibilitySemantics.t(),
           required(:children) => R.vec(ElementNode.t()),
+          required(:pointer) => R.option(String.t()),
+          required(:pointer_position) => R.option(String.t()),
+          required(:pointer_down) => R.option(String.t()),
+          required(:window_pointer_position) => R.option(String.t()),
+          required(:window_pointer_up) => R.option(String.t()),
+          required(:clipboard_write) => R.option(String.t()),
+          required(:clipboard_text) => R.option(String.t()),
+          required(:clipboard_write_request) => R.u64(),
+          required(:clipboard_without_primary) => boolean(),
           required(:click) => R.option(String.t()),
           required(:bounds_change) => R.option(String.t()),
+          required(:scrollbar) => boolean(),
+          required(:scroll_top) => R.f64(),
+          required(:scroll_left) => R.f64(),
+          required(:scroll_horizontal) => boolean(),
+          required(:scroll_request) => R.u64(),
+          required(:scroll_event) => R.option(String.t()),
+          required(:keycapture) => R.option(String.t()),
+          required(:window_keyrelease) => R.option(String.t()),
+          required(:capture_keys) => R.vec(String.t()),
+          required(:keyrelease) => R.option(String.t()),
           required(:focus_request) => R.u64(),
+          required(:tab_stop) => boolean(),
           required(:focus) => R.option(String.t()),
           required(:blur) => R.option(String.t()),
           required(:motion_request) => R.u64(),
@@ -46,6 +67,11 @@ defmodule GPUI.Codegen.Native.Elements do
           required(:motion_from_opacity) => R.f64(),
           required(:motion_from_x) => R.f64(),
           required(:motion_from_y) => R.f64(),
+          required(:motion_to_opacity) => R.f64(),
+          required(:motion_to_x) => R.f64(),
+          required(:motion_to_y) => R.f64(),
+          required(:motion_repeat) => boolean(),
+          required(:motion_alternate) => boolean(),
           required(:window_control) => R.option(String.t())
         }
 
@@ -69,7 +95,15 @@ defmodule GPUI.Codegen.Native.Elements do
           required(:label) => R.option(String.t())
         }
 
+  @type svg_node :: %{
+          required(:id) => R.option(String.t()),
+          required(:spin_duration) => R.u64(),
+          required(:data) => String.t(),
+          required(:style) => StyleAttrs.t()
+        }
+
   @type text_node :: %{
+          required(:truncate_start) => boolean(),
           required(:text) => String.t(),
           required(:style) => StyleAttrs.t()
         }
@@ -92,6 +126,8 @@ defmodule GPUI.Codegen.Native.Elements do
           required(:range) => TextRange.t(),
           required(:color) => R.option(R.u32()),
           required(:background) => R.option(R.u32()),
+          required(:background_opacity) => R.option(R.f64()),
+          required(:font_family) => R.option(String.t()),
           required(:font_weight) => R.option(String.t()),
           required(:font_style) => R.option(String.t()),
           required(:underline) => R.option(R.u32()),
@@ -129,6 +165,7 @@ defmodule GPUI.Codegen.Native.Elements do
           required(:show_whitespaces) => boolean(),
           required(:tab_size) => R.u64(),
           required(:hard_tabs) => boolean(),
+          required(:line_numbers) => boolean(),
           required(:geometry_ranges) => R.vec(TextRange.t()),
           required(:scroll_request) => R.u64(),
           required(:scroll_to) => R.option(TextPosition.t()),
@@ -137,6 +174,8 @@ defmodule GPUI.Codegen.Native.Elements do
           required(:inline_projections) => R.vec(TextInlineProjectionNode.t()),
           required(:block_projections) => R.vec(TextBlockProjectionNode.t()),
           required(:transaction) => R.option(String.t()),
+          required(:keystroke) => R.option(String.t()),
+          required(:keyrelease) => R.option(String.t()),
           required(:submit) => R.option(String.t()),
           required(:selection_change) => R.option(String.t()),
           required(:viewport_change) => R.option(String.t()),
@@ -152,10 +191,14 @@ defmodule GPUI.Codegen.Native.Elements do
           required(:id) => R.option(String.t()),
           required(:value) => String.t(),
           required(:placeholder) => R.option(String.t()),
+          required(:capture_keys) => R.vec(String.t()),
           required(:focus_request) => R.u64(),
+          required(:select_all_request) => R.u64(),
           required(:change) => R.option(String.t()),
           required(:keydown) => R.option(String.t()),
           required(:keyup) => R.option(String.t()),
+          required(:keystroke) => R.option(String.t()),
+          required(:keyrelease) => R.option(String.t()),
           required(:focus) => R.option(String.t()),
           required(:blur) => R.option(String.t())
         }
@@ -206,7 +249,11 @@ defmodule GPUI.Codegen.Native.Elements do
          enum_variant(
            ElementNode,
            :text,
-           struct_literal(TextNode, text: decoded_text, style: default_style())
+           struct_literal(TextNode,
+             truncate_start: false,
+             text: decoded_text,
+             style: default_style()
+           )
          )}
 
       {:error, _reason} ->
@@ -237,7 +284,10 @@ defmodule GPUI.Codegen.Native.Elements do
      enum_variant(
        ElementNode,
        :viewport,
-       struct_literal(ViewportNode, children: unwrap!(decode_children(term)))
+       struct_literal(ViewportNode,
+         rem_size: unwrap!(component_positive_number_attr(term, Atoms.rem_size())),
+         children: unwrap!(decode_children(term))
+       )
      )}
   end
 
@@ -255,10 +305,36 @@ defmodule GPUI.Codegen.Native.Elements do
          id: non_empty_string_attr(term, Atoms.id()),
          accessibility: unwrap!(decode_accessibility(term)),
          children: unwrap!(decode_children(term)),
+         pointer: string_attr(term, Atoms.phx_pointer()),
+         pointer_position: string_attr(term, Atoms.phx_pointer_position()),
+         pointer_down: string_attr(term, Atoms.phx_pointer_down()),
+         window_pointer_position: string_attr(term, Atoms.phx_window_pointer_position()),
+         window_pointer_up: string_attr(term, Atoms.phx_window_pointer_up()),
+         clipboard_write: string_attr(term, Atoms.phx_clipboard_write()),
+         clipboard_text: string_attr(term, Atoms.clipboard_text()),
+         clipboard_write_request:
+           unwrap!(component_non_negative_integer_attr(term, Atoms.clipboard_write_request())).unwrap_or(
+             0
+           ),
+         clipboard_without_primary:
+           unwrap!(component_bool_attr(term, Atoms.clipboard_without_primary())).unwrap_or(false),
          click: string_attr(term, Atoms.phx_click()),
          bounds_change: string_attr(term, Atoms.phx_bounds_change()),
+         scrollbar: unwrap!(component_bool_attr(term, Atoms.scrollbar())).unwrap_or(false),
+         scroll_top: unwrap!(component_number_attr(term, Atoms.scroll_top())).unwrap_or(0.0),
+         scroll_left: unwrap!(component_number_attr(term, Atoms.scroll_left())).unwrap_or(0.0),
+         scroll_horizontal:
+           unwrap!(component_bool_attr(term, Atoms.scroll_horizontal())).unwrap_or(false),
+         scroll_request:
+           unwrap!(component_non_negative_integer_attr(term, Atoms.scroll_request())).unwrap_or(0),
+         scroll_event: string_attr(term, Atoms.phx_scroll()),
+         keycapture: string_attr(term, Atoms.phx_keycapture()),
+         window_keyrelease: string_attr(term, Atoms.phx_window_keyrelease()),
+         capture_keys: unwrap!(component_string_list_attr(term, Atoms.capture_keys())),
+         keyrelease: string_attr(term, Atoms.phx_keyrelease()),
          focus_request:
            unwrap!(component_non_negative_integer_attr(term, Atoms.focus_request())).unwrap_or(0),
+         tab_stop: unwrap!(component_bool_attr(term, Atoms.tab_stop())).unwrap_or(true),
          focus: string_attr(term, Atoms.phx_focus()),
          blur: string_attr(term, Atoms.phx_blur()),
          motion_request:
@@ -277,6 +353,14 @@ defmodule GPUI.Codegen.Native.Elements do
            unwrap!(component_number_attr(term, Atoms.motion_from_x())).unwrap_or(0.0),
          motion_from_y:
            unwrap!(component_number_attr(term, Atoms.motion_from_y())).unwrap_or(0.0),
+         motion_to_opacity:
+           unwrap!(component_number_attr(term, Atoms.motion_to_opacity())).unwrap_or(1.0),
+         motion_to_x: unwrap!(component_number_attr(term, Atoms.motion_to_x())).unwrap_or(0.0),
+         motion_to_y: unwrap!(component_number_attr(term, Atoms.motion_to_y())).unwrap_or(0.0),
+         motion_repeat:
+           unwrap!(component_bool_attr(term, Atoms.motion_repeat())).unwrap_or(false),
+         motion_alternate:
+           unwrap!(component_bool_attr(term, Atoms.motion_alternate())).unwrap_or(false),
          window_control: string_attr(term, Atoms.window_control())
        )
      )}
@@ -398,9 +482,74 @@ defmodule GPUI.Codegen.Native.Elements do
   @spec decode_rich_text_runs(term()) :: R.nif_result(R.vec(RichTextRunNode.t()))
   defrust decode_rich_text_runs(term) do
     case component_attr(term, Atoms.runs()) do
-      {:ok, {:some, value}} -> decode_as(value, R.vec(RichTextRunNode.t()))
-      {:ok, nil} -> {:ok, []}
-      {:error, reason} -> {:error, reason}
+      {:ok, {:some, value}} ->
+        runs = decode_as!(value, R.vec(term()))
+
+        for run <- runs do
+          decode_rich_text_run(run)
+        end
+
+      {:ok, nil} ->
+        {:ok, []}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @spec decode_rich_text_run(term()) :: R.nif_result(RichTextRunNode.t())
+  defrustp decode_rich_text_run(term) do
+    {:ok,
+     struct_literal(RichTextRunNode,
+       range: decode_as!(term.map_get(Atoms.range()), TextRange.t()),
+       color: unwrap!(rich_run_color(term, Atoms.color())),
+       background: unwrap!(rich_run_color(term, Atoms.background())),
+       background_opacity: unwrap!(rich_run_opacity(term, Atoms.background_opacity())),
+       font_family: unwrap!(rich_run_string(term, Atoms.font_family())),
+       font_weight: unwrap!(rich_run_string(term, Atoms.font_weight())),
+       font_style: unwrap!(rich_run_string(term, Atoms.font_style())),
+       underline: unwrap!(rich_run_color(term, Atoms.underline())),
+       underline_style: unwrap!(rich_run_string(term, Atoms.underline_style())),
+       strikethrough: unwrap!(rich_run_color(term, Atoms.strikethrough())),
+       link: unwrap!(rich_run_string(term, Atoms.link()))
+     )}
+  end
+
+  @spec rich_run_string(term(), atom()) :: R.nif_result(R.option(String.t()))
+  defrustp rich_run_string(term, attr) do
+    case term.map_get(attr) do
+      {:ok, value} -> decode_as(value, R.option(String.t()))
+      {:error, _missing} -> {:ok, nil}
+    end
+  end
+
+  @spec rich_run_opacity(term(), atom()) :: R.nif_result(R.option(R.f64()))
+  defrustp rich_run_opacity(term, attr) do
+    case term.map_get(attr) do
+      {:ok, value} ->
+        case decode_as(value, R.option(R.f64())) do
+          {:ok, {:some, number}} -> checked_rich_opacity(number)
+          {:ok, nil} -> {:ok, nil}
+          {:error, _reason} -> checked_rich_opacity(cast(decode_as!(value, R.i64()), R.f64()))
+        end
+
+      {:error, _missing} ->
+        {:ok, nil}
+    end
+  end
+
+  @spec checked_rich_opacity(R.f64()) :: R.nif_result(R.option(R.f64()))
+  defrustp checked_rich_opacity(number) do
+    if number.is_finite() and number.clamp(0.0, 1.0) == number,
+      do: {:ok, some(number)},
+      else: {:error, badarg()}
+  end
+
+  @spec rich_run_color(term(), atom()) :: R.nif_result(R.option(R.u32()))
+  defrustp rich_run_color(term, attr) do
+    case term.map_get(attr) do
+      {:ok, value} -> decode_as(value, R.option(R.u32()))
+      {:error, _missing} -> {:ok, nil}
     end
   end
 
@@ -451,6 +600,7 @@ defmodule GPUI.Codegen.Native.Elements do
            unwrap!(component_bool_attr(term, Atoms.show_whitespaces())).unwrap_or(false),
          tab_size: unwrap!(component_positive_integer_attr(term, Atoms.tab_size())).unwrap_or(2),
          hard_tabs: unwrap!(component_bool_attr(term, Atoms.hard_tabs())).unwrap_or(false),
+         line_numbers: unwrap!(component_bool_attr(term, Atoms.line_numbers())).unwrap_or(false),
          geometry_ranges: unwrap!(text_ranges_attr(term, Atoms.geometry_ranges())),
          scroll_request:
            unwrap!(component_non_negative_integer_attr(term, Atoms.scroll_request())).unwrap_or(0),
@@ -461,6 +611,8 @@ defmodule GPUI.Codegen.Native.Elements do
            unwrap!(text_inline_projections_attr(term, Atoms.inline_projections())),
          block_projections: unwrap!(text_block_projections_attr(term, Atoms.block_projections())),
          transaction: string_attr(term, Atoms.phx_transaction()),
+         keystroke: string_attr(term, Atoms.phx_keystroke()),
+         keyrelease: string_attr(term, Atoms.phx_keyrelease()),
          submit: string_attr(term, Atoms.phx_submit()),
          selection_change: string_attr(term, Atoms.phx_selection_change()),
          viewport_change: string_attr(term, Atoms.phx_viewport_change()),
@@ -485,11 +637,18 @@ defmodule GPUI.Codegen.Native.Elements do
          id: non_empty_string_attr(term, Atoms.id()),
          value: string_attr(term, Atoms.value()).unwrap_or_default(),
          placeholder: string_attr(term, Atoms.placeholder()),
+         capture_keys: unwrap!(component_string_list_attr(term, Atoms.capture_keys())),
          focus_request:
            unwrap!(component_non_negative_integer_attr(term, Atoms.focus_request())).unwrap_or(0),
+         select_all_request:
+           unwrap!(component_non_negative_integer_attr(term, Atoms.select_all_request())).unwrap_or(
+             0
+           ),
          change: string_attr(term, Atoms.phx_change()),
          keydown: string_attr(term, Atoms.phx_keydown()),
          keyup: string_attr(term, Atoms.phx_keyup()),
+         keystroke: string_attr(term, Atoms.phx_keystroke()),
+         keyrelease: string_attr(term, Atoms.phx_keyrelease()),
          focus: string_attr(term, Atoms.phx_focus()),
          blur: string_attr(term, Atoms.phx_blur())
        )
@@ -522,6 +681,25 @@ defmodule GPUI.Codegen.Native.Elements do
     end
   end
 
+  @spec decode_svg_node(term(), GeneratedElementTag.t()) :: R.nif_result(ElementNode.t())
+  defrust decode_svg_node(term, _tag) do
+    attrs = unwrap!(decode_element_attrs(term))
+    data = decode_as!(attrs.map_get(Atoms.data()), String.t())
+
+    {:ok,
+     enum_variant(
+       ElementNode,
+       :svg,
+       struct_literal(SvgNode,
+         id: string_attr(term, Atoms.id()),
+         spin_duration:
+           unwrap!(component_non_negative_integer_attr(term, Atoms.spin_duration())).unwrap_or(0),
+         data: data,
+         style: unwrap!(decode_style(term))
+       )
+     )}
+  end
+
   @spec decode_text_node(term(), GeneratedElementTag.t()) ::
           R.nif_result(ElementNode.t())
   defrust decode_text_node(term, _tag) do
@@ -530,6 +708,8 @@ defmodule GPUI.Codegen.Native.Elements do
        ElementNode,
        :text,
        struct_literal(TextNode,
+         truncate_start:
+           unwrap!(component_bool_attr(term, Atoms.truncate_start())).unwrap_or(false),
          text: unwrap!(decode_text_children(term)),
          style: unwrap!(decode_style(term))
        )
@@ -553,6 +733,7 @@ defmodule GPUI.Codegen.Native.Elements do
             :container_node,
             :anchored_layer_node,
             :image_node,
+            :svg_node,
             :text_node,
             :input_node
           ],

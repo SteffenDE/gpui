@@ -6,6 +6,19 @@ revisioned editable surfaces, see
 [Editable text surfaces](editable-text.html). Implementation details remain in
 [Editable text internals](editable-text-internals.html).
 
+## Precise single-line labels
+
+A native `<text>` with `style={[preserve_layout_bounds: true]}` and
+`class="whitespace-nowrap"` preserves fractional shaped advances. This is useful
+for small shortcut badges and other labels whose width should follow the font
+rather than rounding up to a whole device pixel. Its enclosing auto-sized
+container can also opt into `preserve_layout_bounds`.
+
+Ordinary text retains its existing measurement defaults. Explicit line breaks,
+start truncation and ellipsis retain their existing paths. Zero-spacing precise
+labels keep the font's normal kerning and ligature features; nonzero shortcut
+tracking still separates typographic letters.
+
 ## Application-owned terminals
 
 `GPUI.Terminal.surface/1` is a fixed-cell display and input boundary, not a
@@ -106,9 +119,11 @@ runs = [
 
 Run positions use zero-based `{line, utf16_offset}` coordinates and are
 converted to native UTF-8 shaping ranges without splitting surrogate pairs.
-Runs can set foreground/background color, font weight/style, solid or wavy
+Runs can set foreground/background color, font family/weight/style, solid or wavy
 underline, strikethrough, and an opaque bounded link value. Unstyled gaps
-inherit ordinary component text styles.
+inherit ordinary component text styles. `font_family` accepts a non-empty UTF-8
+font name of up to 256 bytes, such as `"Example Mono"`; the family must be
+available to the native host. Font size remains a component-wide style.
 
 Selection is transient native state. Pointer dragging paints selection, the
 platform select-all and copy shortcuts operate on it, Escape clears it, and a

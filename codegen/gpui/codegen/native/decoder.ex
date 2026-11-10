@@ -35,6 +35,77 @@ defmodule GPUI.Codegen.Native.Decoder do
     end
   end
 
+  @spec box_shadows_value(term()) ::
+          R.option(R.vec(R.path({:gpui_core, :BoxShadowSpec})))
+  defrust box_shadows_value(term) do
+    decode_box_shadows(term).ok()
+  end
+
+  @spec decode_box_shadows(term()) ::
+          R.nif_result(R.vec(R.path({:gpui_core, :BoxShadowSpec})))
+  defrustp decode_box_shadows(term) do
+    rows = decode_as!(term, R.vec(R.vec(term())))
+
+    Enum.map(rows, &decode_box_shadow/1)
+  end
+
+  @spec decode_box_shadow(R.vec(term())) ::
+          R.nif_result(R.path({:gpui_core, :BoxShadowSpec}))
+  defrustp decode_box_shadow(row) do
+    if row.len() == 5 do
+      x = unwrap!(number_value(index(row, 0)).ok_or(badarg()))
+      y = unwrap!(number_value(index(row, 1)).ok_or(badarg()))
+      blur = unwrap!(number_value(index(row, 2)).ok_or(badarg()))
+      spread = unwrap!(number_value(index(row, 3)).ok_or(badarg()))
+      color = unwrap!(color_value(index(row, 4)).ok_or(badarg()))
+
+      if x.is_finite() and y.is_finite() and blur.is_finite() and spread.is_finite() and
+           blur >= 0.0 do
+        {:ok, {x, y, blur, spread, color}}
+      else
+        {:error, badarg()}
+      end
+    else
+      {:error, badarg()}
+    end
+  end
+
+  @spec group_color_value(term()) :: R.option({String.t(), R.u32()})
+  defrust group_color_value(term) do
+    case decode_as(term, {term(), term()}) do
+      {:ok, {name, color}} ->
+        decode_group_color(name, color)
+
+      {:error, _reason} ->
+        case decode_as(term, R.vec(term())) do
+          {:ok, values} ->
+            if values.len() == 2 do
+              decode_group_color(index(values, 0), index(values, 1))
+            else
+              nil
+            end
+
+          {:error, _reason} ->
+            nil
+        end
+    end
+  end
+
+  @spec decode_group_color(term(), term()) :: R.option({String.t(), R.u32()})
+  defrustp decode_group_color(name, color) do
+    group = unwrap!(group_name_value(name))
+    color = unwrap!(color_value(color))
+    some({group, color})
+  end
+
+  @spec group_name_value(term()) :: R.option(String.t())
+  defrustp group_name_value(term) do
+    case term.atom_to_string() do
+      {:ok, value} -> some(value)
+      {:error, _reason} -> decode_as(term, String.t()).ok()
+    end
+  end
+
   @spec color_value(term()) :: R.option(R.u32())
   defrust color_value(term) do
     case decode_as(term, {term(), term()}) do
@@ -81,11 +152,11 @@ defmodule GPUI.Codegen.Native.Decoder do
     end
   end
 
-  @spec px_value(term()) :: R.option(R.f32())
-  defrust px_value(term) do
+  @spec unit_number_value(term(), R.str()) :: R.option(R.f32())
+  defrustp unit_number_value(term, expected) do
     case decode_as(term, {term(), term()}) do
       {:ok, {unit, value}} ->
-        if atom_eq(unit, "px") do
+        if atom_eq(unit, expected) do
           number_value(value)
         else
           nil
@@ -94,7 +165,7 @@ defmodule GPUI.Codegen.Native.Decoder do
       {:error, _reason} ->
         case decode_as(term, R.vec(term())) do
           {:ok, values} ->
-            if values.len() == 2 and atom_eq(index(values, 0), "px") do
+            if values.len() == 2 and atom_eq(index(values, 0), expected) do
               number_value(index(values, 1))
             else
               nil
@@ -106,25 +177,18 @@ defmodule GPUI.Codegen.Native.Decoder do
     end
   end
 
+  @spec px_value(term()) :: R.option(R.f32())
+  defrust(px_value(term), do: unit_number_value(term, "px"))
+
   @spec length_value(term()) :: R.option(Gpui.DefiniteLength.t())
   defrust length_value(term) do
     if atom_eq(term, "full") do
       some(full_length())
     else
-      case decode_as(term, {term(), term()}) do
-        {:ok, {unit, fraction}} ->
-          if atom_eq(unit, "fraction") do
-            case number_value(fraction) do
-              {:some, value} when value >= 0.0 and value <= 1.0 -> some(fraction_length(value))
-              {:some, _other} -> nil
-              :none -> nil
-            end
-          else
-            px_length_value(term)
-          end
-
-        {:error, _reason} ->
-          px_length_value(term)
+      case unit_number_value(term, "fraction") do
+        {:some, value} when value >= 0.0 and value <= 1.0 -> some(fraction_length(value))
+        {:some, _other} -> nil
+        :none -> px_length_value(term)
       end
     end
   end
@@ -157,20 +221,10 @@ defmodule GPUI.Codegen.Native.Decoder do
     if atom_eq(term, "full") do
       some(full_length())
     else
-      case decode_as(term, {term(), term()}) do
-        {:ok, {unit, fraction}} ->
-          if atom_eq(unit, "fraction") do
-            case number_value(fraction) do
-              {:some, value} when value >= -1.0 and value <= 1.0 -> some(fraction_length(value))
-              {:some, _other} -> nil
-              :none -> nil
-            end
-          else
-            px_length_value(term)
-          end
-
-        {:error, _reason} ->
-          px_length_value(term)
+      case unit_number_value(term, "fraction") do
+        {:some, value} when value >= -1.0 and value <= 1.0 -> some(fraction_length(value))
+        {:some, _other} -> nil
+        :none -> px_length_value(term)
       end
     end
   end

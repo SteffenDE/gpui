@@ -7,6 +7,7 @@ pub enum GeneratedComponentKind {
     AnchoredLayer,
     TextSurface,
     Input,
+    Svg,
     Image,
     Text,
     TerminalComponent,
@@ -38,6 +39,74 @@ pub(crate) fn number_value<'a>(term: Term<'a>) -> Option<f32> {
                 Err(_reason) => None,
             }
         }
+    }
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn box_shadows_value<'a>(
+    term: Term<'a>,
+) -> Option<Vec<gpui_core::BoxShadowSpec>> {
+    decode_box_shadows(term).ok()
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn decode_box_shadows<'a>(
+    term: Term<'a>,
+) -> NifResult<Vec<gpui_core::BoxShadowSpec>> {
+    let rows = term.decode::<Vec<Vec<Term<'a>>>>()?;
+    rows.into_iter().map(decode_box_shadow).collect()
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn decode_box_shadow<'a>(
+    row: Vec<Term<'a>>,
+) -> NifResult<gpui_core::BoxShadowSpec> {
+    if row.len() == 5 {
+        let x = number_value(row[0]).ok_or(rustler::Error::BadArg)?;
+        let y = number_value(row[1]).ok_or(rustler::Error::BadArg)?;
+        let blur = number_value(row[2]).ok_or(rustler::Error::BadArg)?;
+        let spread = number_value(row[3]).ok_or(rustler::Error::BadArg)?;
+        let color = color_value(row[4]).ok_or(rustler::Error::BadArg)?;
+        if x.is_finite() && y.is_finite() && blur.is_finite() && spread.is_finite()
+            && blur >= 0.0
+        {
+            Ok((x, y, blur, spread, color))
+        } else {
+            Err(rustler::Error::BadArg)
+        }
+    } else {
+        Err(rustler::Error::BadArg)
+    }
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn group_color_value<'a>(term: Term<'a>) -> Option<(String, u32)> {
+    match term.decode::<(Term<'a>, Term<'a>)>() {
+        Ok((name, color)) => decode_group_color(name, color),
+        Err(_reason) => {
+            match term.decode::<Vec<Term<'a>>>() {
+                Ok(values) => {
+                    if values.len() == 2 {
+                        decode_group_color(values[0], values[1])
+                    } else {
+                        None
+                    }
+                }
+                Err(_reason) => None,
+            }
+        }
+    }
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn decode_group_color<'a>(
+    name: Term<'a>,
+    color: Term<'a>,
+) -> Option<(String, u32)> {
+    let group = group_name_value(name)?;
+    let color = color_value(color)?;
+    Some((group, color))
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn group_name_value<'a>(term: Term<'a>) -> Option<String> {
+    match term.atom_to_string() {
+        Ok(value) => Some(value),
+        Err(_reason) => term.decode::<String>().ok(),
     }
 }
 #[cfg(feature = "real-gpui")]
@@ -76,13 +145,15 @@ pub(crate) fn color_vector_value<'a>(term: Term<'a>) -> Option<u32> {
     }
 }
 #[cfg(feature = "real-gpui")]
-pub(crate) fn px_value<'a>(term: Term<'a>) -> Option<f32> {
+pub(crate) fn unit_number_value<'a>(term: Term<'a>, expected: &str) -> Option<f32> {
     match term.decode::<(Term<'a>, Term<'a>)>() {
-        Ok((unit, value)) => if atom_eq(unit, "px") { number_value(value) } else { None }
+        Ok((unit, value)) => {
+            if atom_eq(unit, expected) { number_value(value) } else { None }
+        }
         Err(_reason) => {
             match term.decode::<Vec<Term<'a>>>() {
                 Ok(values) => {
-                    if values.len() == 2 && atom_eq(values[0], "px") {
+                    if values.len() == 2 && atom_eq(values[0], expected) {
                         number_value(values[1])
                     } else {
                         None
@@ -93,27 +164,20 @@ pub(crate) fn px_value<'a>(term: Term<'a>) -> Option<f32> {
         }
     }
 }
+#[cfg(feature = "real-gpui")]
+pub(crate) fn px_value<'a>(term: Term<'a>) -> Option<f32> {
+    unit_number_value(term, "px")
+}
 #[allow(clippy::manual_range_contains)]
 #[cfg(feature = "real-gpui")]
 pub(crate) fn length_value<'a>(term: Term<'a>) -> Option<gpui::DefiniteLength> {
     if atom_eq(term, "full") {
         Some(full_length())
     } else {
-        match term.decode::<(Term<'a>, Term<'a>)>() {
-            Ok((unit, fraction)) => {
-                if atom_eq(unit, "fraction") {
-                    match number_value(fraction) {
-                        Some(value) if value >= 0.0 && value <= 1.0 => {
-                            Some(fraction_length(value))
-                        }
-                        Some(_other) => None,
-                        None => None,
-                    }
-                } else {
-                    px_length_value(term)
-                }
-            }
-            Err(_reason) => px_length_value(term),
+        match unit_number_value(term, "fraction") {
+            Some(value) if value >= 0.0 && value <= 1.0 => Some(fraction_length(value)),
+            Some(_other) => None,
+            None => px_length_value(term),
         }
     }
 }
@@ -145,21 +209,10 @@ pub(crate) fn position_definite_length_value<'a>(
     if atom_eq(term, "full") {
         Some(full_length())
     } else {
-        match term.decode::<(Term<'a>, Term<'a>)>() {
-            Ok((unit, fraction)) => {
-                if atom_eq(unit, "fraction") {
-                    match number_value(fraction) {
-                        Some(value) if value >= -1.0 && value <= 1.0 => {
-                            Some(fraction_length(value))
-                        }
-                        Some(_other) => None,
-                        None => None,
-                    }
-                } else {
-                    px_length_value(term)
-                }
-            }
-            Err(_reason) => px_length_value(term),
+        match unit_number_value(term, "fraction") {
+            Some(value) if value >= -1.0 && value <= 1.0 => Some(fraction_length(value)),
+            Some(_other) => None,
+            None => px_length_value(term),
         }
     }
 }
@@ -419,9 +472,29 @@ pub(crate) struct ContainerNode {
     pub(crate) id: Option<String>,
     pub(crate) accessibility: AccessibilitySemantics,
     pub(crate) children: Vec<ElementNode>,
+    pub(crate) pointer: Option<String>,
+    pub(crate) pointer_position: Option<String>,
+    pub(crate) pointer_down: Option<String>,
+    pub(crate) window_pointer_position: Option<String>,
+    pub(crate) window_pointer_up: Option<String>,
+    pub(crate) clipboard_write: Option<String>,
+    pub(crate) clipboard_text: Option<String>,
+    pub(crate) clipboard_write_request: u64,
+    pub(crate) clipboard_without_primary: bool,
     pub(crate) click: Option<String>,
     pub(crate) bounds_change: Option<String>,
+    pub(crate) scrollbar: bool,
+    pub(crate) scroll_top: f64,
+    pub(crate) scroll_left: f64,
+    pub(crate) scroll_horizontal: bool,
+    pub(crate) scroll_request: u64,
+    pub(crate) scroll_event: Option<String>,
+    pub(crate) keycapture: Option<String>,
+    pub(crate) window_keyrelease: Option<String>,
+    pub(crate) capture_keys: Vec<String>,
+    pub(crate) keyrelease: Option<String>,
     pub(crate) focus_request: u64,
+    pub(crate) tab_stop: bool,
     pub(crate) focus: Option<String>,
     pub(crate) blur: Option<String>,
     pub(crate) motion_request: u64,
@@ -432,6 +505,11 @@ pub(crate) struct ContainerNode {
     pub(crate) motion_from_opacity: f64,
     pub(crate) motion_from_x: f64,
     pub(crate) motion_from_y: f64,
+    pub(crate) motion_to_opacity: f64,
+    pub(crate) motion_to_x: f64,
+    pub(crate) motion_to_y: f64,
+    pub(crate) motion_repeat: bool,
+    pub(crate) motion_alternate: bool,
     pub(crate) window_control: Option<String>,
 }
 #[derive(Clone, Debug)]
@@ -448,22 +526,36 @@ pub(crate) struct InputNode {
     pub(crate) id: Option<String>,
     pub(crate) value: String,
     pub(crate) placeholder: Option<String>,
+    pub(crate) capture_keys: Vec<String>,
     pub(crate) focus_request: u64,
+    pub(crate) select_all_request: u64,
     pub(crate) change: Option<String>,
     pub(crate) keydown: Option<String>,
     pub(crate) keyup: Option<String>,
+    pub(crate) keystroke: Option<String>,
+    pub(crate) keyrelease: Option<String>,
     pub(crate) focus: Option<String>,
     pub(crate) blur: Option<String>,
 }
 #[derive(Clone, Debug)]
 #[cfg(feature = "real-gpui")]
+pub(crate) struct SvgNode {
+    pub(crate) id: Option<String>,
+    pub(crate) spin_duration: u64,
+    pub(crate) data: String,
+    pub(crate) style: StyleAttrs,
+}
+#[derive(Clone, Debug)]
+#[cfg(feature = "real-gpui")]
 pub(crate) struct TextNode {
+    pub(crate) truncate_start: bool,
     pub(crate) text: String,
     pub(crate) style: StyleAttrs,
 }
 #[derive(Clone, Debug)]
 #[cfg(feature = "real-gpui")]
 pub(crate) struct ViewportNode {
+    pub(crate) rem_size: Option<f64>,
     pub(crate) children: Vec<ElementNode>,
 }
 #[derive(Clone)]
@@ -482,6 +574,7 @@ pub(crate) struct TextSurfaceNode {
     pub(crate) show_whitespaces: bool,
     pub(crate) tab_size: u64,
     pub(crate) hard_tabs: bool,
+    pub(crate) line_numbers: bool,
     pub(crate) geometry_ranges: Vec<TextRange>,
     pub(crate) scroll_request: u64,
     pub(crate) scroll_to: Option<TextPosition>,
@@ -490,6 +583,8 @@ pub(crate) struct TextSurfaceNode {
     pub(crate) inline_projections: Vec<TextInlineProjectionNode>,
     pub(crate) block_projections: Vec<TextBlockProjectionNode>,
     pub(crate) transaction: Option<String>,
+    pub(crate) keystroke: Option<String>,
+    pub(crate) keyrelease: Option<String>,
     pub(crate) submit: Option<String>,
     pub(crate) selection_change: Option<String>,
     pub(crate) viewport_change: Option<String>,
@@ -506,6 +601,8 @@ pub(crate) struct RichTextRunNode {
     pub(crate) range: TextRange,
     pub(crate) color: Option<u32>,
     pub(crate) background: Option<u32>,
+    pub(crate) background_opacity: Option<f64>,
+    pub(crate) font_family: Option<String>,
     pub(crate) font_weight: Option<String>,
     pub(crate) font_style: Option<String>,
     pub(crate) underline: Option<u32>,
@@ -591,6 +688,7 @@ pub(crate) fn decode_element_node<'a>(term: Term<'a>) -> NifResult<ElementNode> 
         Ok(decoded_text) => {
             Ok(
                 ElementNode::Text(TextNode {
+                    truncate_start: false,
                     text: decoded_text,
                     style: default_style(),
                 }),
@@ -622,6 +720,7 @@ pub(crate) fn decode_viewport_node<'a>(
 ) -> NifResult<ElementNode> {
     Ok(
         ElementNode::Viewport(ViewportNode {
+            rem_size: component_positive_number_attr(term, atoms::rem_size())?,
             children: decode_children(term)?,
         }),
     )
@@ -639,13 +738,50 @@ pub(crate) fn decode_container_node<'a>(
             id: non_empty_string_attr(term, atoms::id()),
             accessibility: decode_accessibility(term)?,
             children: decode_children(term)?,
+            pointer: string_attr(term, atoms::phx_pointer()),
+            pointer_position: string_attr(term, atoms::phx_pointer_position()),
+            pointer_down: string_attr(term, atoms::phx_pointer_down()),
+            window_pointer_position: string_attr(
+                term,
+                atoms::phx_window_pointer_position(),
+            ),
+            window_pointer_up: string_attr(term, atoms::phx_window_pointer_up()),
+            clipboard_write: string_attr(term, atoms::phx_clipboard_write()),
+            clipboard_text: string_attr(term, atoms::clipboard_text()),
+            clipboard_write_request: component_non_negative_integer_attr(
+                    term,
+                    atoms::clipboard_write_request(),
+                )?
+                .unwrap_or(0),
+            clipboard_without_primary: component_bool_attr(
+                    term,
+                    atoms::clipboard_without_primary(),
+                )?
+                .unwrap_or(false),
             click: string_attr(term, atoms::phx_click()),
             bounds_change: string_attr(term, atoms::phx_bounds_change()),
+            scrollbar: component_bool_attr(term, atoms::scrollbar())?.unwrap_or(false),
+            scroll_top: component_number_attr(term, atoms::scroll_top())?.unwrap_or(0.0),
+            scroll_left: component_number_attr(term, atoms::scroll_left())?
+                .unwrap_or(0.0),
+            scroll_horizontal: component_bool_attr(term, atoms::scroll_horizontal())?
+                .unwrap_or(false),
+            scroll_request: component_non_negative_integer_attr(
+                    term,
+                    atoms::scroll_request(),
+                )?
+                .unwrap_or(0),
+            scroll_event: string_attr(term, atoms::phx_scroll()),
+            keycapture: string_attr(term, atoms::phx_keycapture()),
+            window_keyrelease: string_attr(term, atoms::phx_window_keyrelease()),
+            capture_keys: component_string_list_attr(term, atoms::capture_keys())?,
+            keyrelease: string_attr(term, atoms::phx_keyrelease()),
             focus_request: component_non_negative_integer_attr(
                     term,
                     atoms::focus_request(),
                 )?
                 .unwrap_or(0),
+            tab_stop: component_bool_attr(term, atoms::tab_stop())?.unwrap_or(true),
             focus: string_attr(term, atoms::phx_focus()),
             blur: string_attr(term, atoms::phx_blur()),
             motion_request: component_non_negative_integer_attr(
@@ -676,6 +812,16 @@ pub(crate) fn decode_container_node<'a>(
                 .unwrap_or(0.0),
             motion_from_y: component_number_attr(term, atoms::motion_from_y())?
                 .unwrap_or(0.0),
+            motion_to_opacity: component_number_attr(term, atoms::motion_to_opacity())?
+                .unwrap_or(1.0),
+            motion_to_x: component_number_attr(term, atoms::motion_to_x())?
+                .unwrap_or(0.0),
+            motion_to_y: component_number_attr(term, atoms::motion_to_y())?
+                .unwrap_or(0.0),
+            motion_repeat: component_bool_attr(term, atoms::motion_repeat())?
+                .unwrap_or(false),
+            motion_alternate: component_bool_attr(term, atoms::motion_alternate())?
+                .unwrap_or(false),
             window_control: string_attr(term, atoms::window_control()),
         }),
     )
@@ -795,9 +941,69 @@ pub(crate) fn decode_rich_text_runs<'a>(
     term: Term<'a>,
 ) -> NifResult<Vec<RichTextRunNode>> {
     match component_attr(term, atoms::runs()) {
-        Ok(Some(value)) => value.decode::<Vec<RichTextRunNode>>(),
+        Ok(Some(value)) => {
+            let runs = value.decode::<Vec<Term<'a>>>()?;
+            runs.into_iter().map(|run| decode_rich_text_run(run)).collect()
+        }
         Ok(None) => Ok(vec![]),
         Err(reason) => Err(reason),
+    }
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn decode_rich_text_run<'a>(term: Term<'a>) -> NifResult<RichTextRunNode> {
+    Ok(RichTextRunNode {
+        range: term.map_get(atoms::range())?.decode::<TextRange>()?,
+        color: rich_run_color(term, atoms::color())?,
+        background: rich_run_color(term, atoms::background())?,
+        background_opacity: rich_run_opacity(term, atoms::background_opacity())?,
+        font_family: rich_run_string(term, atoms::font_family())?,
+        font_weight: rich_run_string(term, atoms::font_weight())?,
+        font_style: rich_run_string(term, atoms::font_style())?,
+        underline: rich_run_color(term, atoms::underline())?,
+        underline_style: rich_run_string(term, atoms::underline_style())?,
+        strikethrough: rich_run_color(term, atoms::strikethrough())?,
+        link: rich_run_string(term, atoms::link())?,
+    })
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn rich_run_string<'a>(
+    term: Term<'a>,
+    attr: Atom,
+) -> NifResult<Option<String>> {
+    match term.map_get(attr) {
+        Ok(value) => value.decode::<Option<String>>(),
+        Err(_missing) => Ok(None),
+    }
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn rich_run_opacity<'a>(
+    term: Term<'a>,
+    attr: Atom,
+) -> NifResult<Option<f64>> {
+    match term.map_get(attr) {
+        Ok(value) => {
+            match value.decode::<Option<f64>>() {
+                Ok(Some(number)) => checked_rich_opacity(number),
+                Ok(None) => Ok(None),
+                Err(_reason) => checked_rich_opacity(value.decode::<i64>()? as f64),
+            }
+        }
+        Err(_missing) => Ok(None),
+    }
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn checked_rich_opacity(number: f64) -> NifResult<Option<f64>> {
+    if number.is_finite() && number.clamp(0.0, 1.0) == number {
+        Ok(Some(number))
+    } else {
+        Err(rustler::Error::BadArg)
+    }
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn rich_run_color<'a>(term: Term<'a>, attr: Atom) -> NifResult<Option<u32>> {
+    match term.map_get(attr) {
+        Ok(value) => value.decode::<Option<u32>>(),
+        Err(_missing) => Ok(None),
     }
 }
 #[cfg(feature = "real-gpui")]
@@ -854,6 +1060,8 @@ pub(crate) fn decode_text_surface_node<'a>(
             tab_size: component_positive_integer_attr(term, atoms::tab_size())?
                 .unwrap_or(2),
             hard_tabs: component_bool_attr(term, atoms::hard_tabs())?.unwrap_or(false),
+            line_numbers: component_bool_attr(term, atoms::line_numbers())?
+                .unwrap_or(false),
             geometry_ranges: text_ranges_attr(term, atoms::geometry_ranges())?,
             scroll_request: component_non_negative_integer_attr(
                     term,
@@ -872,6 +1080,8 @@ pub(crate) fn decode_text_surface_node<'a>(
                 atoms::block_projections(),
             )?,
             transaction: string_attr(term, atoms::phx_transaction()),
+            keystroke: string_attr(term, atoms::phx_keystroke()),
+            keyrelease: string_attr(term, atoms::phx_keyrelease()),
             submit: string_attr(term, atoms::phx_submit()),
             selection_change: string_attr(term, atoms::phx_selection_change()),
             viewport_change: string_attr(term, atoms::phx_viewport_change()),
@@ -894,14 +1104,22 @@ pub(crate) fn decode_input_node<'a>(
             id: non_empty_string_attr(term, atoms::id()),
             value: string_attr(term, atoms::value()).unwrap_or_default(),
             placeholder: string_attr(term, atoms::placeholder()),
+            capture_keys: component_string_list_attr(term, atoms::capture_keys())?,
             focus_request: component_non_negative_integer_attr(
                     term,
                     atoms::focus_request(),
                 )?
                 .unwrap_or(0),
+            select_all_request: component_non_negative_integer_attr(
+                    term,
+                    atoms::select_all_request(),
+                )?
+                .unwrap_or(0),
             change: string_attr(term, atoms::phx_change()),
             keydown: string_attr(term, atoms::phx_keydown()),
             keyup: string_attr(term, atoms::phx_keyup()),
+            keystroke: string_attr(term, atoms::phx_keystroke()),
+            keyrelease: string_attr(term, atoms::phx_keyrelease()),
             focus: string_attr(term, atoms::phx_focus()),
             blur: string_attr(term, atoms::phx_blur()),
         }),
@@ -934,12 +1152,34 @@ pub(crate) fn decode_text_children<'a>(term: Term<'a>) -> NifResult<String> {
     }
 }
 #[cfg(feature = "real-gpui")]
+pub(crate) fn decode_svg_node<'a>(
+    term: Term<'a>,
+    _tag: GeneratedElementTag,
+) -> NifResult<ElementNode> {
+    let attrs = decode_element_attrs(term)?;
+    let data = attrs.map_get(atoms::data())?.decode::<String>()?;
+    Ok(
+        ElementNode::Svg(SvgNode {
+            id: string_attr(term, atoms::id()),
+            spin_duration: component_non_negative_integer_attr(
+                    term,
+                    atoms::spin_duration(),
+                )?
+                .unwrap_or(0),
+            data,
+            style: decode_style(term)?,
+        }),
+    )
+}
+#[cfg(feature = "real-gpui")]
 pub(crate) fn decode_text_node<'a>(
     term: Term<'a>,
     _tag: GeneratedElementTag,
 ) -> NifResult<ElementNode> {
     Ok(
         ElementNode::Text(TextNode {
+            truncate_start: component_bool_attr(term, atoms::truncate_start())?
+                .unwrap_or(false),
             text: decode_text_children(term)?,
             style: decode_style(term)?,
         }),
@@ -969,17 +1209,23 @@ pub(crate) struct StyleAttrs {
     pub(crate) white_space: Option<String>,
     pub(crate) text_overflow: Option<String>,
     pub(crate) text_align: Option<String>,
+    pub(crate) preserve_layout_bounds: bool,
+    pub(crate) paint_rounding: Option<String>,
     pub(crate) truncate: bool,
     pub(crate) cursor: Option<String>,
     pub(crate) background: Option<u32>,
     pub(crate) color: Option<u32>,
+    pub(crate) text_decoration: Option<String>,
+    pub(crate) font_family: Option<String>,
     pub(crate) font_size: Option<f32>,
     pub(crate) font_weight: Option<String>,
     pub(crate) line_height: Option<f32>,
     pub(crate) opacity: Option<f32>,
     pub(crate) visibility: Option<String>,
     pub(crate) group: Option<String>,
+    pub(crate) hover_color: Option<u32>,
     pub(crate) hover_background: Option<u32>,
+    pub(crate) group_hover_background: Option<(String, u32)>,
     pub(crate) group_hover_visible: Option<String>,
     pub(crate) group_hover_invisible: Option<String>,
     pub(crate) gap: Option<f32>,
@@ -1004,7 +1250,24 @@ pub(crate) struct StyleAttrs {
     pub(crate) min_height: Option<gpui::DefiniteLength>,
     pub(crate) max_height: Option<gpui::DefiniteLength>,
     pub(crate) border_radius: Option<f32>,
+    pub(crate) border_top_left_radius: Option<f32>,
+    pub(crate) border_top_right_radius: Option<f32>,
+    pub(crate) border_bottom_right_radius: Option<f32>,
+    pub(crate) border_bottom_left_radius: Option<f32>,
     pub(crate) border_width: Option<f32>,
+    pub(crate) border_top_width: Option<f32>,
+    pub(crate) border_right_width: Option<f32>,
+    pub(crate) border_bottom_width: Option<f32>,
+    pub(crate) border_left_width: Option<f32>,
+    pub(crate) box_shadow: Option<Vec<gpui_core::BoxShadowSpec>>,
+    pub(crate) ring_width: Option<f32>,
+    pub(crate) ring_color: Option<u32>,
+    pub(crate) focus_outline_mode: Option<String>,
+    pub(crate) focus_outline_color: Option<u32>,
+    pub(crate) selected_background: Option<u32>,
+    pub(crate) focus_outline_width: Option<f32>,
+    pub(crate) focus_outline_offset: Option<f32>,
+    pub(crate) focus_outline_radius: Option<f32>,
     pub(crate) border_color: Option<u32>,
 }
 #[cfg(feature = "real-gpui")]
@@ -1160,6 +1423,18 @@ pub(crate) fn apply_generated_style_attr<'a>(
             attrs.text_align = value;
             valid
         }
+        value if value == atoms::preserve_layout_bounds() => {
+            let value = atom_eq(term, "true");
+            let valid = atom_eq(term, "true") || atom_eq(term, "false");
+            attrs.preserve_layout_bounds = value;
+            valid
+        }
+        value if value == atoms::paint_rounding() => {
+            let value = atom_string(term);
+            let valid = value.is_some();
+            attrs.paint_rounding = value;
+            valid
+        }
         value if value == atoms::truncate() => {
             let value = atom_eq(term, "true");
             let valid = value;
@@ -1182,6 +1457,18 @@ pub(crate) fn apply_generated_style_attr<'a>(
             let value = color_value(term);
             let valid = value.is_some();
             attrs.color = value;
+            valid
+        }
+        value if value == atoms::text_decoration() => {
+            let value = atom_string(term);
+            let valid = value.is_some();
+            attrs.text_decoration = value;
+            valid
+        }
+        value if value == atoms::font_family() => {
+            let value = atom_string(term);
+            let valid = value.is_some();
+            attrs.font_family = value;
             valid
         }
         value if value == atoms::font_size() => {
@@ -1215,9 +1502,15 @@ pub(crate) fn apply_generated_style_attr<'a>(
             valid
         }
         value if value == atoms::group() => {
-            let value = atom_string(term);
+            let value = group_name_value(term);
             let valid = value.is_some();
             attrs.group = value;
+            valid
+        }
+        value if value == atoms::hover_color() => {
+            let value = color_value(term);
+            let valid = value.is_some();
+            attrs.hover_color = value;
             valid
         }
         value if value == atoms::hover_background() => {
@@ -1226,14 +1519,20 @@ pub(crate) fn apply_generated_style_attr<'a>(
             attrs.hover_background = value;
             valid
         }
+        value if value == atoms::group_hover_background() => {
+            let value = group_color_value(term);
+            let valid = value.is_some();
+            attrs.group_hover_background = value;
+            valid
+        }
         value if value == atoms::group_hover_visible() => {
-            let value = atom_string(term);
+            let value = group_name_value(term);
             let valid = value.is_some();
             attrs.group_hover_visible = value;
             valid
         }
         value if value == atoms::group_hover_invisible() => {
-            let value = atom_string(term);
+            let value = group_name_value(term);
             let valid = value.is_some();
             attrs.group_hover_invisible = value;
             valid
@@ -1370,10 +1669,112 @@ pub(crate) fn apply_generated_style_attr<'a>(
             attrs.border_radius = value;
             valid
         }
+        value if value == atoms::border_top_left_radius() => {
+            let value = radius_value(term);
+            let valid = value.is_some();
+            attrs.border_top_left_radius = value;
+            valid
+        }
+        value if value == atoms::border_top_right_radius() => {
+            let value = radius_value(term);
+            let valid = value.is_some();
+            attrs.border_top_right_radius = value;
+            valid
+        }
+        value if value == atoms::border_bottom_right_radius() => {
+            let value = radius_value(term);
+            let valid = value.is_some();
+            attrs.border_bottom_right_radius = value;
+            valid
+        }
+        value if value == atoms::border_bottom_left_radius() => {
+            let value = radius_value(term);
+            let valid = value.is_some();
+            attrs.border_bottom_left_radius = value;
+            valid
+        }
         value if value == atoms::border_width() => {
             let value = px_value(term);
             let valid = value.is_some();
             attrs.border_width = value;
+            valid
+        }
+        value if value == atoms::border_top_width() => {
+            let value = px_value(term);
+            let valid = value.is_some();
+            attrs.border_top_width = value;
+            valid
+        }
+        value if value == atoms::border_right_width() => {
+            let value = px_value(term);
+            let valid = value.is_some();
+            attrs.border_right_width = value;
+            valid
+        }
+        value if value == atoms::border_bottom_width() => {
+            let value = px_value(term);
+            let valid = value.is_some();
+            attrs.border_bottom_width = value;
+            valid
+        }
+        value if value == atoms::border_left_width() => {
+            let value = px_value(term);
+            let valid = value.is_some();
+            attrs.border_left_width = value;
+            valid
+        }
+        value if value == atoms::box_shadow() => {
+            let value = box_shadows_value(term);
+            let valid = value.is_some();
+            attrs.box_shadow = value;
+            valid
+        }
+        value if value == atoms::ring_width() => {
+            let value = px_value(term);
+            let valid = value.is_some();
+            attrs.ring_width = value;
+            valid
+        }
+        value if value == atoms::ring_color() => {
+            let value = color_value(term);
+            let valid = value.is_some();
+            attrs.ring_color = value;
+            valid
+        }
+        value if value == atoms::focus_outline_mode() => {
+            let value = atom_string(term);
+            let valid = value.is_some();
+            attrs.focus_outline_mode = value;
+            valid
+        }
+        value if value == atoms::focus_outline_color() => {
+            let value = color_value(term);
+            let valid = value.is_some();
+            attrs.focus_outline_color = value;
+            valid
+        }
+        value if value == atoms::selected_background() => {
+            let value = color_value(term);
+            let valid = value.is_some();
+            attrs.selected_background = value;
+            valid
+        }
+        value if value == atoms::focus_outline_width() => {
+            let value = px_value(term);
+            let valid = value.is_some();
+            attrs.focus_outline_width = value;
+            valid
+        }
+        value if value == atoms::focus_outline_offset() => {
+            let value = px_value(term);
+            let valid = value.is_some();
+            attrs.focus_outline_offset = value;
+            valid
+        }
+        value if value == atoms::focus_outline_radius() => {
+            let value = radius_value(term);
+            let valid = value.is_some();
+            attrs.focus_outline_radius = value;
             valid
         }
         value if value == atoms::border_color() => {
@@ -1596,6 +1997,18 @@ pub(crate) fn apply_generated_render_styles(
         }
         _ => {}
     };
+    if style.preserve_layout_bounds {
+        element = element.preserve_layout_bounds();
+    }
+    match style.paint_rounding.as_deref() {
+        Some("half_up") => {
+            element = element.paint_rounding_half_up();
+        }
+        Some("half_toward_zero") => {
+            element = element.paint_rounding_half_toward_zero();
+        }
+        _ => {}
+    };
     if style.truncate {
         element = element.truncate();
     }
@@ -1626,6 +2039,18 @@ pub(crate) fn apply_generated_render_styles(
     match style.color {
         Some(value) => {
             element = element.text_color(gpui::rgba(value));
+        }
+        _ => {}
+    };
+    match style.text_decoration.as_deref() {
+        Some("underline") => {
+            element = element.underline();
+        }
+        _ => {}
+    };
+    match style.font_family {
+        Some(value) => {
+            element = element.font_family(value);
         }
         _ => {}
     };
@@ -1680,9 +2105,11 @@ pub(crate) fn apply_generated_render_styles(
         }
         _ => {}
     };
-    match style.hover_background {
+    match style.group_hover_background {
         Some(value) => {
-            element = element.hover(|refinement| refinement.bg(gpui::rgba(value)));
+            let (group, color) = value;
+            element = element
+                .group_hover(group, |refinement| refinement.bg(gpui::rgba(color)));
         }
         _ => {}
     };
@@ -1830,9 +2257,86 @@ pub(crate) fn apply_generated_render_styles(
         }
         _ => {}
     };
+    match style.border_top_left_radius {
+        Some(value) => {
+            element = element.rounded_tl(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_top_right_radius {
+        Some(value) => {
+            element = element.rounded_tr(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_bottom_right_radius {
+        Some(value) => {
+            element = element.rounded_br(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_bottom_left_radius {
+        Some(value) => {
+            element = element.rounded_bl(gpui::px(value));
+        }
+        _ => {}
+    };
     match style.border_width {
         Some(value) => {
             element = element.border(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_top_width {
+        Some(value) => {
+            element = element.border_t(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_right_width {
+        Some(value) => {
+            element = element.border_r(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_bottom_width {
+        Some(value) => {
+            element = element.border_b(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_left_width {
+        Some(value) => {
+            element = element.border_l(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.box_shadow {
+        Some(value) => {
+            let shadows = value
+                .into_iter()
+                .rev()
+                .map(|(x, y, blur, spread, color)| {
+                    gpui::BoxShadow::new(
+                            gpui::px(x),
+                            gpui::px(y),
+                            gpui::rgba(color).into(),
+                        )
+                        .blur_radius(gpui::px(blur / 2.0))
+                        .spread_radius(gpui::px(spread))
+                })
+                .collect();
+            element = element.shadow(shadows);
+        }
+        _ => {}
+    };
+    match style.ring_color {
+        Some(value) => {
+            element = element
+                .ring(
+                    gpui::px(style.ring_width.unwrap_or(1.0)),
+                    gpui::rgba(value).into(),
+                );
         }
         _ => {}
     };
@@ -1842,6 +2346,25 @@ pub(crate) fn apply_generated_render_styles(
         }
         _ => {}
     };
+    if style.hover_color.is_some() || style.hover_background.is_some() {
+        element = element
+            .hover(|refinement| {
+                let mut refinement = refinement;
+                match style.hover_color {
+                    Some(value) => {
+                        refinement = refinement.text_color(gpui::rgba(value));
+                    }
+                    _ => {}
+                };
+                match style.hover_background {
+                    Some(value) => {
+                        refinement = refinement.bg(gpui::rgba(value));
+                    }
+                    _ => {}
+                };
+                refinement
+            });
+    }
     element
 }
 #[cfg(feature = "real-gpui")]
@@ -1883,6 +2406,9 @@ pub(crate) enum AccessibilityRole {
     Link,
     List,
     ListItem,
+    Menu,
+    MenuItem,
+    MenuItemCheckbox,
     Progress,
     Radio,
     Slider,
@@ -1939,6 +2465,9 @@ pub(crate) fn decode_accessibility_role<'a>(
                 "link" => Ok(Some(AccessibilityRole::Link)),
                 "list" => Ok(Some(AccessibilityRole::List)),
                 "list_item" => Ok(Some(AccessibilityRole::ListItem)),
+                "menu" => Ok(Some(AccessibilityRole::Menu)),
+                "menu_item" => Ok(Some(AccessibilityRole::MenuItem)),
+                "menu_item_checkbox" => Ok(Some(AccessibilityRole::MenuItemCheckbox)),
                 "progress" => Ok(Some(AccessibilityRole::Progress)),
                 "radio" => Ok(Some(AccessibilityRole::Radio)),
                 "slider" => Ok(Some(AccessibilityRole::Slider)),
@@ -2022,6 +2551,9 @@ impl AccessibilityRole {
             AccessibilityRole::Link => gpui::Role::Link,
             AccessibilityRole::List => gpui::Role::List,
             AccessibilityRole::ListItem => gpui::Role::ListItem,
+            AccessibilityRole::Menu => gpui::Role::Menu,
+            AccessibilityRole::MenuItem => gpui::Role::MenuItem,
+            AccessibilityRole::MenuItemCheckbox => gpui::Role::MenuItemCheckBox,
             AccessibilityRole::Progress => gpui::Role::ProgressIndicator,
             AccessibilityRole::Radio => gpui::Role::RadioButton,
             AccessibilityRole::Slider => gpui::Role::Slider,
@@ -2070,6 +2602,9 @@ impl AccessibilityRole {
             AccessibilityRole::Link => true,
             AccessibilityRole::List => false,
             AccessibilityRole::ListItem => false,
+            AccessibilityRole::Menu => false,
+            AccessibilityRole::MenuItem => true,
+            AccessibilityRole::MenuItemCheckbox => true,
             AccessibilityRole::Progress => false,
             AccessibilityRole::Radio => true,
             AccessibilityRole::Slider => false,
@@ -2288,6 +2823,7 @@ pub(crate) enum ElementNode {
     FrostComponent(FrostComponentNode),
     PaintComponent(PaintComponentNode),
     Image(ImageNode),
+    Svg(SvgNode),
     Text(TextNode),
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2302,6 +2838,7 @@ pub enum GeneratedElementTag {
     Item,
     TextSurface,
     TextInput,
+    Svg,
     Img,
     Text,
     UiTerminal,
@@ -2324,6 +2861,7 @@ pub fn decode_generated_element_tag(tag: &str) -> GeneratedElementTag {
         "item" => GeneratedElementTag::Item,
         "text_surface" => GeneratedElementTag::TextSurface,
         "text_input" => GeneratedElementTag::TextInput,
+        "svg" => GeneratedElementTag::Svg,
         "img" => GeneratedElementTag::Img,
         "text" => GeneratedElementTag::Text,
         "ui_terminal" => GeneratedElementTag::UiTerminal,
@@ -2347,6 +2885,7 @@ pub fn generated_component_kind(tag: GeneratedElementTag) -> GeneratedComponentK
         GeneratedElementTag::Item => GeneratedComponentKind::Container,
         GeneratedElementTag::TextSurface => GeneratedComponentKind::TextSurface,
         GeneratedElementTag::TextInput => GeneratedComponentKind::Input,
+        GeneratedElementTag::Svg => GeneratedComponentKind::Svg,
         GeneratedElementTag::Img => GeneratedComponentKind::Image,
         GeneratedElementTag::Text => GeneratedComponentKind::Text,
         GeneratedElementTag::UiTerminal => GeneratedComponentKind::TerminalComponent,
@@ -2374,6 +2913,7 @@ pub(crate) fn decode_generated_element_node<'a>(
         GeneratedComponentKind::AnchoredLayer => decode_anchored_layer_node(term, tag),
         GeneratedComponentKind::TextSurface => decode_text_surface_node(term, tag),
         GeneratedComponentKind::Input => decode_input_node(term, tag),
+        GeneratedComponentKind::Svg => decode_svg_node(term, tag),
         GeneratedComponentKind::Image => decode_image_node(term, tag),
         GeneratedComponentKind::Text => decode_text_node(term, tag),
         GeneratedComponentKind::TerminalComponent => {

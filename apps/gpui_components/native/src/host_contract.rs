@@ -18,6 +18,7 @@ macro_rules! opaque_event {
 }
 opaque_event!(
     ComponentInputEvent,
+    ComponentKeystrokeEvent,
     ComponentTransferEvent,
     ComponentFileDialogEvent,
     ComponentTextGeometryEvent,

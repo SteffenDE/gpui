@@ -17,11 +17,16 @@ pub struct Config<'a> {
     pub height: f32,
     pub min_width: Option<f32>,
     pub min_height: Option<f32>,
+    pub restore_bounds: Option<Vec<f64>>,
+    pub cascade_offset: u32,
+    pub center_in_work_area: bool,
     pub resizable: bool,
     pub content_chrome: bool,
     pub close_request: bool,
     pub focus: bool,
     pub blur: bool,
+    pub appearance: bool,
+    pub geometry: bool,
     pub commands: Vec<(String, String)>,
     pub tree: Term<'a>,
 }
@@ -31,6 +36,9 @@ pub struct Decoded<'a> {
     pub title: String,
     pub size: Vec<u32>,
     pub min_size: Option<Vec<u32>>,
+    pub restore_bounds: Option<Vec<f64>>,
+    pub cascade_offset: u32,
+    pub center_in_work_area: bool,
     pub resizable: bool,
     pub chrome: Chrome,
     pub lifecycle: Vec<Lifecycle>,
@@ -53,6 +61,8 @@ pub enum Lifecycle {
     CloseRequest,
     Focus,
     Blur,
+    Appearance,
+    Geometry,
 }
 #[derive(Clone, Debug, rustler::NifMap)]
 pub struct Root<'a> {
@@ -60,6 +70,7 @@ pub struct Root<'a> {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq, rustler::NifUnitEnum)]
 pub enum Theme {
+    System,
     Light,
     Dark,
 }
@@ -97,6 +108,15 @@ fn close_request(window_id: u64) -> CloseRequest {
 }
 fn decode_close(request: CloseRequest) -> u64 {
     request.window_id
+}
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(unused_variables)]
+fn activate_window<'a>(
+    env: Env<'a>,
+    runtime: ResourceArc<RuntimeResource>,
+    window_id: u64,
+) -> NifResult<Term<'a>> {
+    activate_window_impl(env, runtime, window_id)
 }
 #[rustler::nif(schedule = "DirtyIo")]
 #[allow(unused_variables)]
@@ -170,8 +190,17 @@ fn set_theme<'a>(
 ) -> NifResult<Term<'a>> {
     set_theme_impl(env, runtime, mode)
 }
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(unused_variables)]
+fn load_font<'a>(
+    env: Env<'a>,
+    runtime: ResourceArc<RuntimeResource>,
+    bytes: Binary<'a>,
+) -> NifResult<Term<'a>> {
+    load_font_impl(env, runtime, bytes)
+}
 fn decode_update<'a>(request: UpdateRequest<'a>) -> NifResult<(u64, ElementNode)> {
-    match decode_element_node(request.tree) {
+    match decode_tree(request.tree) {
         Ok(tree) => Ok((request.window_id, tree)),
         Err(reason) => Err(reason),
     }
@@ -192,6 +221,16 @@ fn normalize<'a>(decoded: Decoded<'a>) -> NifResult<Config<'a>> {
                 .clone()
                 .into_iter()
                 .any(|event| event == lifecycle_focus());
+            let appearance = decoded
+                .lifecycle
+                .clone()
+                .into_iter()
+                .any(|event| event == lifecycle_appearance());
+            let geometry = decoded
+                .lifecycle
+                .clone()
+                .into_iter()
+                .any(|event| event == lifecycle_geometry());
             let blur = decoded
                 .lifecycle
                 .into_iter()
@@ -203,11 +242,16 @@ fn normalize<'a>(decoded: Decoded<'a>) -> NifResult<Config<'a>> {
                 height: *height as f32,
                 min_width,
                 min_height,
+                restore_bounds: decoded.restore_bounds,
+                cascade_offset: decoded.cascade_offset,
+                center_in_work_area: decoded.center_in_work_area,
                 resizable: decoded.resizable,
                 content_chrome: decoded.chrome == chrome_content(),
                 close_request,
                 focus,
                 blur,
+                appearance,
+                geometry,
                 commands: decoded.commands,
                 tree: decoded.root.tree,
             })

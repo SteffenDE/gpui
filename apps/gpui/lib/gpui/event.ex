@@ -1,6 +1,15 @@
 defmodule GPUI.Event do
   @moduledoc """
   Normalized UI event delivered from a display into `GPUI.Session`.
+
+  Physical primitive clicks with held keys include a top-level `:modifiers` map
+  with boolean `:control`, `:alt`, `:shift`, and `:platform` fields. Unmodified
+  clicks and keyboard/accessibility activation retain the plain click envelope.
+  `:pointer` events carry `:value` with boolean `:hovered` and the same four
+  modifier fields, including key changes while the pointer is stationary.
+  Root `phx-keycapture` callbacks emit `:keystroke` values with an additional
+  `:captured` boolean. `true` means native handling was stopped; `false` preserves
+  native handling, including editable input and unlisted or modified shortcuts.
   """
 
   alias GPUI.Transfer.Event, as: TransferEvent
@@ -12,9 +21,12 @@ defmodule GPUI.Event do
           | :text
           | :paste
           | :resize
+          | :pointer
+          | :link_hover
           | :click
           | :command
           | :change
+          | :open
           | :select
           | :release
           | :search
@@ -44,6 +56,8 @@ defmodule GPUI.Event do
           | :window_focus
           | :window_blur
           | :window_closed
+          | :window_geometry
+          | :window_appearance
   @type payload :: %{
           required(:type) => type(),
           required(:window_id) => pos_integer(),
@@ -65,9 +79,12 @@ defmodule GPUI.Event do
     :text,
     :paste,
     :resize,
+    :pointer,
+    :link_hover,
     :click,
     :command,
     :change,
+    :open,
     :select,
     :release,
     :search,
@@ -94,18 +111,27 @@ defmodule GPUI.Event do
     :copy,
     :file_read
   ]
-  @lifecycle_types [:window_close_request, :window_focus, :window_blur, :window_closed]
+  @lifecycle_types [
+    :window_close_request,
+    :window_focus,
+    :window_blur,
+    :window_closed,
+    :window_geometry,
+    :window_appearance
+  ]
   @injectable_routed_types [
     :click,
     :command,
     :change,
+    :open,
     :release,
     :search,
     :submit,
     :keydown,
     :keyup
   ]
-  @injectable_types @injectable_routed_types ++ @lifecycle_types
+  @injectable_types @injectable_routed_types ++
+                      (@lifecycle_types -- [:window_appearance, :window_geometry])
   @known_types @routed_types ++ @lifecycle_types
   @max_event_name_bytes 512
   @max_file_read_bytes 25 * 1_024 * 1_024
@@ -160,6 +186,21 @@ defmodule GPUI.Event do
     if Map.has_key?(event, :event), do: invalid(:event), else: :ok
   end
 
+  defp normalize_value(
+         :window_geometry,
+         %{value: %{bounds: [x, y, width, height], initial: initial}} = event
+       )
+       when is_number(x) and is_number(y) and is_number(width) and is_number(height) and width > 0 and
+              height > 0 and is_boolean(initial),
+       do: {:ok, event}
+
+  defp normalize_value(:window_geometry, _), do: invalid(:value)
+
+  defp normalize_value(:window_appearance, %{value: mode} = event) when mode in [:light, :dark],
+    do: {:ok, event}
+
+  defp normalize_value(:window_appearance, _), do: invalid(:value)
+
   defp normalize_value(type, event) when type in [:drag_enter, :drag_move, :drag_leave, :drop] do
     with {:ok, value} <- fetch_value(event),
          {:ok, value} <- TransferEvent.normalize(type, value) do
@@ -187,7 +228,44 @@ defmodule GPUI.Event do
     end
   end
 
-  defp normalize_value(type, event) when type in [:click, :command, :clipboard_write, :copy] do
+  defp normalize_value(:link_hover, %{value: value} = event) when is_map(value) do
+    if is_binary(value[:id]) and is_boolean(value[:hovered]) and
+         (is_nil(value[:link]) or is_binary(value[:link])) and
+         Enum.all?([:x, :y, :width, :height], &finite_number?(value[&1])) and
+         value.width >= 0 and value.height >= 0, do: {:ok, event}, else: invalid(:value)
+  end
+
+  defp normalize_value(:link_hover, _), do: invalid(:value)
+
+  defp normalize_value(:pointer, %{value: value} = event) when is_map(value) do
+    if Enum.all?([:hovered, :control, :alt, :shift, :platform], &is_boolean(Map.get(value, &1))),
+      do: {:ok, event},
+      else: invalid(:value)
+  end
+
+  defp normalize_value(:pointer, _), do: invalid(:value)
+
+  defp normalize_value(:click, event) do
+    cond do
+      Map.has_key?(event, :value) ->
+        invalid(:value)
+
+      not Map.has_key?(event, :modifiers) ->
+        {:ok, event}
+
+      is_map(event.modifiers) and
+          Enum.all?(
+            [:control, :alt, :shift, :platform],
+            &is_boolean(Map.get(event.modifiers, &1))
+          ) ->
+        {:ok, event}
+
+      true ->
+        invalid(:modifiers)
+    end
+  end
+
+  defp normalize_value(type, event) when type in [:command, :clipboard_write, :copy] do
     if Map.has_key?(event, :value), do: invalid(:value), else: {:ok, event}
   end
 
@@ -200,7 +278,7 @@ defmodule GPUI.Event do
   defp normalize_value(:select, event),
     do: require_value(event, &(is_binary(&1) or is_nil(&1)))
 
-  defp normalize_value(type, event) when type in [:search, :submit, :link],
+  defp normalize_value(type, event) when type in [:search, :submit, :link, :open],
     do: require_value(event, &is_binary/1)
 
   defp normalize_value(:release, event), do: require_value(event, &finite_number?/1)

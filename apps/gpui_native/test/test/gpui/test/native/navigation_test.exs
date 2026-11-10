@@ -32,15 +32,18 @@ defmodule GPUI.Test.Native.NavigationTest do
         open={assigns.open}
         title="Settings"
         show_title={Map.get(assigns, :show_title, true)}
+        pointer_dismiss={Map.get(assigns, :pointer_dismiss, true)}
         width={280}
         margin_top={Map.get(assigns, :margin_top)}
+        margin_top_ratio={Map.get(assigns, :margin_top_ratio)}
         phx-change="dialog_changed"
       >
         <:trigger>
           <button id="dialog-trigger"><text>Open settings</text></button>
         </:trigger>
         <:content>
-          <button id="dialog-action" phx-click="dialog_action"><text>Apply</text></button>
+          <button id="dialog-action" phx-focus="dialog-action-focus" phx-click="dialog_action"><text>Apply</text></button>
+          <GPUI.UI.button id="component-dialog-action" label="Component action" phx-click="component_dialog_action" />
         </:content>
       </Overlay.dialog>
       """
@@ -105,6 +108,16 @@ defmodule GPUI.Test.Native.NavigationTest do
     assert_receive {:gpui, ^ui, {:event, %{type: :change, event: "dialog_changed", value: true}}}
   end
 
+  test "confirmation dialogs ignore outside clicks while retaining Escape", %{ui: ui} do
+    render(ui, DialogView, open: true, pointer_dismiss: false)
+    settle(ui)
+    click(ui, {10, 210})
+    settle(ui)
+    refute_receive {:gpui, ^ui, {:event, %{event: "dialog_changed", value: false}}}
+    press(ui, :escape)
+    assert_receive {:gpui, ^ui, {:event, %{event: "dialog_changed", value: false}}}
+  end
+
   test "dialog opens in the native top layer and routes content activation", %{ui: ui} do
     render(ui, DialogView, open: true)
     settle(ui)
@@ -115,6 +128,28 @@ defmodule GPUI.Test.Native.NavigationTest do
 
     click(ui, "dialog-action")
     assert_receive {:gpui, ^ui, {:event, %{type: :click, event: "dialog_action"}}}
+  end
+
+  test "focused dialog buttons receive Enter and Space once without closing the dialog", %{ui: ui} do
+    render(ui, DialogView, open: true)
+    settle(ui)
+    focus(ui, "dialog-action")
+    settle(ui)
+
+    for key <- ["enter", "space"] do
+      press(ui, key)
+      assert_receive {:gpui, ^ui, {:event, %{event: "dialog_action"}}}
+      refute_receive {:gpui, ^ui, {:event, %{event: "dialog_action"}}}
+      refute_receive {:gpui, ^ui, {:event, %{event: "dialog_changed", value: false}}}
+    end
+
+    press(ui, "tab")
+
+    for key <- ["enter", "space"] do
+      press(ui, key)
+      assert_receive {:gpui, ^ui, {:event, %{event: "component_dialog_action"}}}
+      refute_receive {:gpui, ^ui, {:event, %{event: "component_dialog_action"}}}
+    end
   end
 
   test "search-first dialogs omit the heading and retain content activation and Escape", %{ui: ui} do

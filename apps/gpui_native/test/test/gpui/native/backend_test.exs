@@ -63,11 +63,34 @@ defmodule GPUI.Native.BackendTest do
              GPUI.Native.Backend.drain_events(runtime)
   end
 
+  test "modified clicks round-trip through the native event boundary" do
+    assert {:ok, runtime} = GPUI.Native.Backend.start_runtime()
+
+    event = %{
+      type: :click,
+      window_id: 7,
+      event: "open",
+      modifiers: %{control: false, alt: false, shift: true, platform: true}
+    }
+
+    assert {:ok, :ok} = GPUI.Native.Backend.inject_event(runtime, event)
+    assert {:ok, [^event]} = GPUI.Native.Backend.drain_events(runtime)
+    assert {:ok, :ok} = GPUI.Native.Backend.stop_runtime(runtime)
+  end
+
+  test "rejects malformed font configuration before starting a native runtime" do
+    Process.flag(:trap_exit, true)
+
+    for fonts <- [nil, "font.ttf", [123], [""], List.duplicate("font", 65)] do
+      assert {:error, :invalid_fonts} = GPUI.Display.Native.start_link(fonts: fonts)
+    end
+  end
+
   test "rejects unsupported native component themes" do
     Process.flag(:trap_exit, true)
 
-    assert {:error, {:invalid_theme, :system}} =
-             GPUI.Display.Native.start_link(theme: :system)
+    assert {:error, {:invalid_theme, :sepia}} =
+             GPUI.Display.Native.start_link(theme: :sepia)
   end
 
   test "keeps low-level native lifecycle operations behind the backend adapter" do
@@ -92,5 +115,6 @@ defmodule GPUI.Native.BackendTest do
     assert function_exported?(GPUI.Native.Backend, :await_frame_after, 4)
     assert function_exported?(GPUI.Native.Backend, :stop_runtime, 1)
     assert function_exported?(GPUI.Native.Backend, :set_theme, 2)
+    assert function_exported?(GPUI.Native.Backend, :load_font, 2)
   end
 end

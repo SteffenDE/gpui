@@ -38,6 +38,26 @@ pub struct TargetRequest {
 }
 #[rustler::nif(schedule = "DirtyIo")]
 #[allow(unused_variables)]
+fn native_test_double_click<'a>(
+    env: Env<'a>,
+    session: ResourceArc<native_test::NativeTestSessionResource>,
+    target: String,
+) -> NifResult<Term<'a>> {
+    native_test_double_click_impl(env, session, target_request(target))
+}
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(unused_variables)]
+fn native_test_pinch<'a>(
+    env: Env<'a>,
+    session: ResourceArc<native_test::NativeTestSessionResource>,
+    target: String,
+    delta: f64,
+    phase: String,
+) -> NifResult<Term<'a>> {
+    native_test_pinch_impl(env, session, target, delta, phase)
+}
+#[rustler::nif(schedule = "DirtyIo")]
+#[allow(unused_variables)]
 fn native_test_drag<'a>(
     env: Env<'a>,
     session: ResourceArc<native_test::NativeTestSessionResource>,

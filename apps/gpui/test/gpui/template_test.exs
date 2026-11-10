@@ -14,6 +14,24 @@ defmodule GPUI.TemplateTest do
 
   import GPUI.Template, only: [sigil_GPUI: 2]
 
+  test "compiled shadow layers remain data with literal and runtime styles" do
+    layers = [
+      {0.0, 4.0, 6.0, -1.0, {:rgba, 0x0000001A}},
+      {0.0, 2.0, 4.0, -2.0, {:rgba, 0x0000001A}}
+    ]
+
+    plain = ~GPUI'<div class="shadow-md" />'
+    literal = ~GPUI'<div style={[font_size: {:px, 13.0}]} class="shadow-md" />'
+    runtime_style = [font_size: {:px, 15.0}]
+    dynamic = ~GPUI'<div style={runtime_style} class="shadow-md" />'
+
+    for element <- [plain, literal, dynamic],
+        do: assert(element.attrs[:style][:box_shadow] == layers)
+
+    assert literal.attrs[:style][:font_size] == {:px, 13.0}
+    assert dynamic.attrs[:style][:font_size] == {:px, 15.0}
+  end
+
   def card(assigns) do
     %GPUI.Element{type: :card, attrs: [title: assigns.title], children: assigns.children}
   end
@@ -28,6 +46,14 @@ defmodule GPUI.TemplateTest do
     def badge(assigns) do
       %GPUI.Element{type: :badge, attrs: [label: assigns.label], children: assigns.children}
     end
+  end
+
+  test "start truncation is an explicit text flag and preserves source content" do
+    element = ~GPUI"<text truncate_start={true}>very/long/directory/</text>"
+    assert element.attrs[:truncate_start] == true
+    assert GPUI.Element.to_payload(element).children == ["very/long/directory/"]
+    ordinary = ~GPUI"<text>unchanged</text>"
+    refute Keyword.has_key?(ordinary.attrs, :truncate_start)
   end
 
   test "builds element trees from HEEx-style templates" do
@@ -155,6 +181,20 @@ defmodule GPUI.TemplateTest do
     assert layer_child_style[:background] == [:rgb, 0x1E293B]
   end
 
+  test "checkable menu items serialize their checked state on actionable primitives" do
+    checked = true
+
+    payload =
+      ~GPUI"""
+      <button id="wrap" accessibility_role="menu_item_checkbox" accessibility_label="Wrap lines"
+        accessibility_checked={checked} phx-click="wrap" />
+      """
+      |> GPUI.Element.to_payload()
+
+    assert payload.attrs.accessibility_role == "menu_item_checkbox"
+    assert payload.attrs.accessibility_checked == "true"
+  end
+
   test "serializes bounded neutral accessibility metadata" do
     role = "button"
     label = "Retry connection"
@@ -252,6 +292,19 @@ defmodule GPUI.TemplateTest do
 
     assert tree_item.attrs.accessibility_selected
     refute tree_item.attrs.accessibility_expanded
+
+    menu =
+      ~GPUI"""
+      <div id="menu" accessibility_role="menu" accessibility_label="Actions">
+        <div id="submenu" accessibility_role="menu_item" accessibility_label="History" accessibility_expanded={true} phx-click="history" />
+        <div id="disabled-item" accessibility_role="menu_item" accessibility_label="Unavailable" accessibility_disabled={true} />
+      </div>
+      """
+      |> GPUI.Element.to_payload()
+
+    assert menu.attrs.accessibility_role == "menu"
+    assert hd(menu.children).attrs.accessibility_expanded
+    assert List.last(menu.children).attrs.accessibility_disabled
 
     splitter =
       ~GPUI"""
@@ -516,6 +569,73 @@ defmodule GPUI.TemplateTest do
     assert_raise ArgumentError, ~r/focus behavior requires a non-empty string id/, fn ->
       ~GPUI"""
       <button phx-focus="missing-id"><text>Missing</text></button>
+      """
+      |> GPUI.Element.to_payload()
+    end
+  end
+
+  test "one-shot input selection serializes with a stable identity" do
+    input =
+      ~GPUI"""
+      <text_input id="rename" value="Inbox" select_all_request={3} />
+      """
+      |> GPUI.Element.to_payload()
+
+    assert input.attrs.select_all_request == 3
+
+    assert_raise ArgumentError, ~r/focus behavior requires a non-empty string id/, fn ->
+      GPUI.Element.to_payload(%GPUI.Element{type: :text_input, attrs: [select_all_request: 1]})
+    end
+  end
+
+  test "input key capture is opt-in and validates unique named keys" do
+    payload =
+      ~GPUI"""
+      <text_input id="complete" capture_keys={["tab", "shift-tab"]} phx-keystroke="complete" />
+      """
+      |> GPUI.Element.to_payload()
+
+    assert payload.attrs.capture_keys == ["tab", "shift-tab"]
+
+    for keys <- [["unknown"], ["tab", "tab"]] do
+      assert_raise ArgumentError, ~r/unique list/, fn ->
+        GPUI.Element.to_payload(%GPUI.Element{type: :text_input, attrs: [capture_keys: keys]})
+      end
+    end
+  end
+
+  test "individual card corners retain their native radii" do
+    payload =
+      ~GPUI"""
+      <div style={[border_top_left_radius: {:px, 8.0}, border_top_right_radius: {:px, 8.0},
+        border_bottom_right_radius: {:px, 0.0}, border_bottom_left_radius: {:px, 0.0}]} />
+      """
+      |> GPUI.Element.to_payload()
+
+    assert payload.attrs.style == [
+             border_top_left_radius: [:px, 8.0],
+             border_top_right_radius: [:px, 8.0],
+             border_bottom_right_radius: [:px, 0.0],
+             border_bottom_left_radius: [:px, 0.0]
+           ]
+  end
+
+  test "container key releases require a stable focus identity" do
+    payload =
+      ~GPUI"""
+      <div id="inbox" phx-keyrelease="open" phx-focus="entered" phx-blur="left" focus_request={1}><text>Inbox</text></div>
+      """
+      |> GPUI.Element.to_payload()
+
+    assert payload.attrs.id == "inbox"
+    assert payload.attrs[:"phx-keyrelease"] == "open"
+    assert payload.attrs[:"phx-focus"] == "entered"
+    assert payload.attrs[:"phx-blur"] == "left"
+    assert payload.attrs.focus_request == 1
+
+    assert_raise ArgumentError, ~r/focus behavior requires a non-empty string id/, fn ->
+      ~GPUI"""
+      <div phx-keyrelease="open"><text>Inbox</text></div>
       """
       |> GPUI.Element.to_payload()
     end

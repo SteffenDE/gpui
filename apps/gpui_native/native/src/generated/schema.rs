@@ -7,6 +7,7 @@ pub enum GeneratedComponentKind {
     AnchoredLayer,
     TextSurface,
     Input,
+    Svg,
     Image,
     Text,
     TerminalComponent,
@@ -18,12 +19,15 @@ pub enum GeneratedComponentKind {
     DropTargetComponent,
     DragSourceComponent,
     SplitComponent,
+    PanZoomComponent,
     ButtonComponent,
     ProgressComponent,
     PopoverComponent,
     PopoverTriggerComponent,
     PopoverContentComponent,
     TooltipComponent,
+    TooltipContentComponent,
+    TooltipShortcutComponent,
     TooltipTriggerComponent,
     DialogComponent,
     DialogTriggerComponent,
@@ -89,6 +93,74 @@ pub(crate) fn number_value<'a>(term: Term<'a>) -> Option<f32> {
     }
 }
 #[cfg(feature = "real-gpui")]
+pub(crate) fn box_shadows_value<'a>(
+    term: Term<'a>,
+) -> Option<Vec<gpui_core::BoxShadowSpec>> {
+    decode_box_shadows(term).ok()
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn decode_box_shadows<'a>(
+    term: Term<'a>,
+) -> NifResult<Vec<gpui_core::BoxShadowSpec>> {
+    let rows = term.decode::<Vec<Vec<Term<'a>>>>()?;
+    rows.into_iter().map(decode_box_shadow).collect()
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn decode_box_shadow<'a>(
+    row: Vec<Term<'a>>,
+) -> NifResult<gpui_core::BoxShadowSpec> {
+    if row.len() == 5 {
+        let x = number_value(row[0]).ok_or(rustler::Error::BadArg)?;
+        let y = number_value(row[1]).ok_or(rustler::Error::BadArg)?;
+        let blur = number_value(row[2]).ok_or(rustler::Error::BadArg)?;
+        let spread = number_value(row[3]).ok_or(rustler::Error::BadArg)?;
+        let color = color_value(row[4]).ok_or(rustler::Error::BadArg)?;
+        if x.is_finite() && y.is_finite() && blur.is_finite() && spread.is_finite()
+            && blur >= 0.0
+        {
+            Ok((x, y, blur, spread, color))
+        } else {
+            Err(rustler::Error::BadArg)
+        }
+    } else {
+        Err(rustler::Error::BadArg)
+    }
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn group_color_value<'a>(term: Term<'a>) -> Option<(String, u32)> {
+    match term.decode::<(Term<'a>, Term<'a>)>() {
+        Ok((name, color)) => decode_group_color(name, color),
+        Err(_reason) => {
+            match term.decode::<Vec<Term<'a>>>() {
+                Ok(values) => {
+                    if values.len() == 2 {
+                        decode_group_color(values[0], values[1])
+                    } else {
+                        None
+                    }
+                }
+                Err(_reason) => None,
+            }
+        }
+    }
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn decode_group_color<'a>(
+    name: Term<'a>,
+    color: Term<'a>,
+) -> Option<(String, u32)> {
+    let group = group_name_value(name)?;
+    let color = color_value(color)?;
+    Some((group, color))
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn group_name_value<'a>(term: Term<'a>) -> Option<String> {
+    match term.atom_to_string() {
+        Ok(value) => Some(value),
+        Err(_reason) => term.decode::<String>().ok(),
+    }
+}
+#[cfg(feature = "real-gpui")]
 pub(crate) fn color_value<'a>(term: Term<'a>) -> Option<u32> {
     match term.decode::<(Term<'a>, Term<'a>)>() {
         Ok((unit, value)) => decode_color_value(unit, value),
@@ -124,13 +196,15 @@ pub(crate) fn color_vector_value<'a>(term: Term<'a>) -> Option<u32> {
     }
 }
 #[cfg(feature = "real-gpui")]
-pub(crate) fn px_value<'a>(term: Term<'a>) -> Option<f32> {
+pub(crate) fn unit_number_value<'a>(term: Term<'a>, expected: &str) -> Option<f32> {
     match term.decode::<(Term<'a>, Term<'a>)>() {
-        Ok((unit, value)) => if atom_eq(unit, "px") { number_value(value) } else { None }
+        Ok((unit, value)) => {
+            if atom_eq(unit, expected) { number_value(value) } else { None }
+        }
         Err(_reason) => {
             match term.decode::<Vec<Term<'a>>>() {
                 Ok(values) => {
-                    if values.len() == 2 && atom_eq(values[0], "px") {
+                    if values.len() == 2 && atom_eq(values[0], expected) {
                         number_value(values[1])
                     } else {
                         None
@@ -141,27 +215,20 @@ pub(crate) fn px_value<'a>(term: Term<'a>) -> Option<f32> {
         }
     }
 }
+#[cfg(feature = "real-gpui")]
+pub(crate) fn px_value<'a>(term: Term<'a>) -> Option<f32> {
+    unit_number_value(term, "px")
+}
 #[allow(clippy::manual_range_contains)]
 #[cfg(feature = "real-gpui")]
 pub(crate) fn length_value<'a>(term: Term<'a>) -> Option<gpui::DefiniteLength> {
     if atom_eq(term, "full") {
         Some(full_length())
     } else {
-        match term.decode::<(Term<'a>, Term<'a>)>() {
-            Ok((unit, fraction)) => {
-                if atom_eq(unit, "fraction") {
-                    match number_value(fraction) {
-                        Some(value) if value >= 0.0 && value <= 1.0 => {
-                            Some(fraction_length(value))
-                        }
-                        Some(_other) => None,
-                        None => None,
-                    }
-                } else {
-                    px_length_value(term)
-                }
-            }
-            Err(_reason) => px_length_value(term),
+        match unit_number_value(term, "fraction") {
+            Some(value) if value >= 0.0 && value <= 1.0 => Some(fraction_length(value)),
+            Some(_other) => None,
+            None => px_length_value(term),
         }
     }
 }
@@ -193,21 +260,10 @@ pub(crate) fn position_definite_length_value<'a>(
     if atom_eq(term, "full") {
         Some(full_length())
     } else {
-        match term.decode::<(Term<'a>, Term<'a>)>() {
-            Ok((unit, fraction)) => {
-                if atom_eq(unit, "fraction") {
-                    match number_value(fraction) {
-                        Some(value) if value >= -1.0 && value <= 1.0 => {
-                            Some(fraction_length(value))
-                        }
-                        Some(_other) => None,
-                        None => None,
-                    }
-                } else {
-                    px_length_value(term)
-                }
-            }
-            Err(_reason) => px_length_value(term),
+        match unit_number_value(term, "fraction") {
+            Some(value) if value >= -1.0 && value <= 1.0 => Some(fraction_length(value)),
+            Some(_other) => None,
+            None => px_length_value(term),
         }
     }
 }
@@ -464,9 +520,29 @@ pub(crate) struct ContainerNode {
     pub(crate) id: Option<String>,
     pub(crate) accessibility: AccessibilitySemantics,
     pub(crate) children: Vec<ElementNode>,
+    pub(crate) pointer: Option<String>,
+    pub(crate) pointer_position: Option<String>,
+    pub(crate) pointer_down: Option<String>,
+    pub(crate) window_pointer_position: Option<String>,
+    pub(crate) window_pointer_up: Option<String>,
+    pub(crate) clipboard_write: Option<String>,
+    pub(crate) clipboard_text: Option<String>,
+    pub(crate) clipboard_write_request: u64,
+    pub(crate) clipboard_without_primary: bool,
     pub(crate) click: Option<String>,
     pub(crate) bounds_change: Option<String>,
+    pub(crate) scrollbar: bool,
+    pub(crate) scroll_top: f64,
+    pub(crate) scroll_left: f64,
+    pub(crate) scroll_horizontal: bool,
+    pub(crate) scroll_request: u64,
+    pub(crate) scroll_event: Option<String>,
+    pub(crate) keycapture: Option<String>,
+    pub(crate) window_keyrelease: Option<String>,
+    pub(crate) capture_keys: Vec<String>,
+    pub(crate) keyrelease: Option<String>,
     pub(crate) focus_request: u64,
+    pub(crate) tab_stop: bool,
     pub(crate) focus: Option<String>,
     pub(crate) blur: Option<String>,
     pub(crate) motion_request: u64,
@@ -477,6 +553,11 @@ pub(crate) struct ContainerNode {
     pub(crate) motion_from_opacity: f64,
     pub(crate) motion_from_x: f64,
     pub(crate) motion_from_y: f64,
+    pub(crate) motion_to_opacity: f64,
+    pub(crate) motion_to_x: f64,
+    pub(crate) motion_to_y: f64,
+    pub(crate) motion_repeat: bool,
+    pub(crate) motion_alternate: bool,
     pub(crate) window_control: Option<String>,
 }
 #[derive(Clone, Debug)]
@@ -493,22 +574,36 @@ pub(crate) struct InputNode {
     pub(crate) id: Option<String>,
     pub(crate) value: String,
     pub(crate) placeholder: Option<String>,
+    pub(crate) capture_keys: Vec<String>,
     pub(crate) focus_request: u64,
+    pub(crate) select_all_request: u64,
     pub(crate) change: Option<String>,
     pub(crate) keydown: Option<String>,
     pub(crate) keyup: Option<String>,
+    pub(crate) keystroke: Option<String>,
+    pub(crate) keyrelease: Option<String>,
     pub(crate) focus: Option<String>,
     pub(crate) blur: Option<String>,
 }
 #[derive(Clone, Debug)]
 #[cfg(feature = "real-gpui")]
+pub(crate) struct SvgNode {
+    pub(crate) id: Option<String>,
+    pub(crate) spin_duration: u64,
+    pub(crate) data: String,
+    pub(crate) style: StyleAttrs,
+}
+#[derive(Clone, Debug)]
+#[cfg(feature = "real-gpui")]
 pub(crate) struct TextNode {
+    pub(crate) truncate_start: bool,
     pub(crate) text: String,
     pub(crate) style: StyleAttrs,
 }
 #[derive(Clone, Debug)]
 #[cfg(feature = "real-gpui")]
 pub(crate) struct ViewportNode {
+    pub(crate) rem_size: Option<f64>,
     pub(crate) children: Vec<ElementNode>,
 }
 #[derive(Clone)]
@@ -527,6 +622,7 @@ pub(crate) struct TextSurfaceNode {
     pub(crate) show_whitespaces: bool,
     pub(crate) tab_size: u64,
     pub(crate) hard_tabs: bool,
+    pub(crate) line_numbers: bool,
     pub(crate) geometry_ranges: Vec<TextRange>,
     pub(crate) scroll_request: u64,
     pub(crate) scroll_to: Option<TextPosition>,
@@ -535,6 +631,8 @@ pub(crate) struct TextSurfaceNode {
     pub(crate) inline_projections: Vec<TextInlineProjectionNode>,
     pub(crate) block_projections: Vec<TextBlockProjectionNode>,
     pub(crate) transaction: Option<String>,
+    pub(crate) keystroke: Option<String>,
+    pub(crate) keyrelease: Option<String>,
     pub(crate) submit: Option<String>,
     pub(crate) selection_change: Option<String>,
     pub(crate) viewport_change: Option<String>,
@@ -550,6 +648,8 @@ pub(crate) struct RichTextRunNode {
     pub(crate) range: TextRange,
     pub(crate) color: Option<u32>,
     pub(crate) background: Option<u32>,
+    pub(crate) background_opacity: Option<f64>,
+    pub(crate) font_family: Option<String>,
     pub(crate) font_weight: Option<String>,
     pub(crate) font_style: Option<String>,
     pub(crate) underline: Option<u32>,
@@ -635,6 +735,7 @@ pub(crate) fn decode_element_node<'a>(term: Term<'a>) -> NifResult<ElementNode> 
         Ok(decoded_text) => {
             Ok(
                 ElementNode::Text(TextNode {
+                    truncate_start: false,
                     text: decoded_text,
                     style: default_style(),
                 }),
@@ -666,6 +767,7 @@ pub(crate) fn decode_viewport_node<'a>(
 ) -> NifResult<ElementNode> {
     Ok(
         ElementNode::Viewport(ViewportNode {
+            rem_size: component_positive_number_attr(term, atoms::rem_size())?,
             children: decode_children(term)?,
         }),
     )
@@ -683,13 +785,50 @@ pub(crate) fn decode_container_node<'a>(
             id: non_empty_string_attr(term, atoms::id()),
             accessibility: decode_accessibility(term)?,
             children: decode_children(term)?,
+            pointer: string_attr(term, atoms::phx_pointer()),
+            pointer_position: string_attr(term, atoms::phx_pointer_position()),
+            pointer_down: string_attr(term, atoms::phx_pointer_down()),
+            window_pointer_position: string_attr(
+                term,
+                atoms::phx_window_pointer_position(),
+            ),
+            window_pointer_up: string_attr(term, atoms::phx_window_pointer_up()),
+            clipboard_write: string_attr(term, atoms::phx_clipboard_write()),
+            clipboard_text: string_attr(term, atoms::clipboard_text()),
+            clipboard_write_request: component_non_negative_integer_attr(
+                    term,
+                    atoms::clipboard_write_request(),
+                )?
+                .unwrap_or(0),
+            clipboard_without_primary: component_bool_attr(
+                    term,
+                    atoms::clipboard_without_primary(),
+                )?
+                .unwrap_or(false),
             click: string_attr(term, atoms::phx_click()),
             bounds_change: string_attr(term, atoms::phx_bounds_change()),
+            scrollbar: component_bool_attr(term, atoms::scrollbar())?.unwrap_or(false),
+            scroll_top: component_number_attr(term, atoms::scroll_top())?.unwrap_or(0.0),
+            scroll_left: component_number_attr(term, atoms::scroll_left())?
+                .unwrap_or(0.0),
+            scroll_horizontal: component_bool_attr(term, atoms::scroll_horizontal())?
+                .unwrap_or(false),
+            scroll_request: component_non_negative_integer_attr(
+                    term,
+                    atoms::scroll_request(),
+                )?
+                .unwrap_or(0),
+            scroll_event: string_attr(term, atoms::phx_scroll()),
+            keycapture: string_attr(term, atoms::phx_keycapture()),
+            window_keyrelease: string_attr(term, atoms::phx_window_keyrelease()),
+            capture_keys: component_string_list_attr(term, atoms::capture_keys())?,
+            keyrelease: string_attr(term, atoms::phx_keyrelease()),
             focus_request: component_non_negative_integer_attr(
                     term,
                     atoms::focus_request(),
                 )?
                 .unwrap_or(0),
+            tab_stop: component_bool_attr(term, atoms::tab_stop())?.unwrap_or(true),
             focus: string_attr(term, atoms::phx_focus()),
             blur: string_attr(term, atoms::phx_blur()),
             motion_request: component_non_negative_integer_attr(
@@ -720,6 +859,16 @@ pub(crate) fn decode_container_node<'a>(
                 .unwrap_or(0.0),
             motion_from_y: component_number_attr(term, atoms::motion_from_y())?
                 .unwrap_or(0.0),
+            motion_to_opacity: component_number_attr(term, atoms::motion_to_opacity())?
+                .unwrap_or(1.0),
+            motion_to_x: component_number_attr(term, atoms::motion_to_x())?
+                .unwrap_or(0.0),
+            motion_to_y: component_number_attr(term, atoms::motion_to_y())?
+                .unwrap_or(0.0),
+            motion_repeat: component_bool_attr(term, atoms::motion_repeat())?
+                .unwrap_or(false),
+            motion_alternate: component_bool_attr(term, atoms::motion_alternate())?
+                .unwrap_or(false),
             window_control: string_attr(term, atoms::window_control()),
         }),
     )
@@ -838,9 +987,69 @@ pub(crate) fn decode_rich_text_runs<'a>(
     term: Term<'a>,
 ) -> NifResult<Vec<RichTextRunNode>> {
     match component_attr(term, atoms::runs()) {
-        Ok(Some(value)) => value.decode::<Vec<RichTextRunNode>>(),
+        Ok(Some(value)) => {
+            let runs = value.decode::<Vec<Term<'a>>>()?;
+            runs.into_iter().map(|run| decode_rich_text_run(run)).collect()
+        }
         Ok(None) => Ok(vec![]),
         Err(reason) => Err(reason),
+    }
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn decode_rich_text_run<'a>(term: Term<'a>) -> NifResult<RichTextRunNode> {
+    Ok(RichTextRunNode {
+        range: term.map_get(atoms::range())?.decode::<TextRange>()?,
+        color: rich_run_color(term, atoms::color())?,
+        background: rich_run_color(term, atoms::background())?,
+        background_opacity: rich_run_opacity(term, atoms::background_opacity())?,
+        font_family: rich_run_string(term, atoms::font_family())?,
+        font_weight: rich_run_string(term, atoms::font_weight())?,
+        font_style: rich_run_string(term, atoms::font_style())?,
+        underline: rich_run_color(term, atoms::underline())?,
+        underline_style: rich_run_string(term, atoms::underline_style())?,
+        strikethrough: rich_run_color(term, atoms::strikethrough())?,
+        link: rich_run_string(term, atoms::link())?,
+    })
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn rich_run_string<'a>(
+    term: Term<'a>,
+    attr: Atom,
+) -> NifResult<Option<String>> {
+    match term.map_get(attr) {
+        Ok(value) => value.decode::<Option<String>>(),
+        Err(_missing) => Ok(None),
+    }
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn rich_run_opacity<'a>(
+    term: Term<'a>,
+    attr: Atom,
+) -> NifResult<Option<f64>> {
+    match term.map_get(attr) {
+        Ok(value) => {
+            match value.decode::<Option<f64>>() {
+                Ok(Some(number)) => checked_rich_opacity(number),
+                Ok(None) => Ok(None),
+                Err(_reason) => checked_rich_opacity(value.decode::<i64>()? as f64),
+            }
+        }
+        Err(_missing) => Ok(None),
+    }
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn checked_rich_opacity(number: f64) -> NifResult<Option<f64>> {
+    if number.is_finite() && number.clamp(0.0, 1.0) == number {
+        Ok(Some(number))
+    } else {
+        Err(rustler::Error::BadArg)
+    }
+}
+#[cfg(feature = "real-gpui")]
+pub(crate) fn rich_run_color<'a>(term: Term<'a>, attr: Atom) -> NifResult<Option<u32>> {
+    match term.map_get(attr) {
+        Ok(value) => value.decode::<Option<u32>>(),
+        Err(_missing) => Ok(None),
     }
 }
 #[cfg(feature = "real-gpui")]
@@ -897,6 +1106,8 @@ pub(crate) fn decode_text_surface_node<'a>(
             tab_size: component_positive_integer_attr(term, atoms::tab_size())?
                 .unwrap_or(2),
             hard_tabs: component_bool_attr(term, atoms::hard_tabs())?.unwrap_or(false),
+            line_numbers: component_bool_attr(term, atoms::line_numbers())?
+                .unwrap_or(false),
             geometry_ranges: text_ranges_attr(term, atoms::geometry_ranges())?,
             scroll_request: component_non_negative_integer_attr(
                     term,
@@ -915,6 +1126,8 @@ pub(crate) fn decode_text_surface_node<'a>(
                 atoms::block_projections(),
             )?,
             transaction: string_attr(term, atoms::phx_transaction()),
+            keystroke: string_attr(term, atoms::phx_keystroke()),
+            keyrelease: string_attr(term, atoms::phx_keyrelease()),
             submit: string_attr(term, atoms::phx_submit()),
             selection_change: string_attr(term, atoms::phx_selection_change()),
             viewport_change: string_attr(term, atoms::phx_viewport_change()),
@@ -937,14 +1150,22 @@ pub(crate) fn decode_input_node<'a>(
             id: non_empty_string_attr(term, atoms::id()),
             value: string_attr(term, atoms::value()).unwrap_or_default(),
             placeholder: string_attr(term, atoms::placeholder()),
+            capture_keys: component_string_list_attr(term, atoms::capture_keys())?,
             focus_request: component_non_negative_integer_attr(
                     term,
                     atoms::focus_request(),
                 )?
                 .unwrap_or(0),
+            select_all_request: component_non_negative_integer_attr(
+                    term,
+                    atoms::select_all_request(),
+                )?
+                .unwrap_or(0),
             change: string_attr(term, atoms::phx_change()),
             keydown: string_attr(term, atoms::phx_keydown()),
             keyup: string_attr(term, atoms::phx_keyup()),
+            keystroke: string_attr(term, atoms::phx_keystroke()),
+            keyrelease: string_attr(term, atoms::phx_keyrelease()),
             focus: string_attr(term, atoms::phx_focus()),
             blur: string_attr(term, atoms::phx_blur()),
         }),
@@ -977,12 +1198,34 @@ pub(crate) fn decode_text_children<'a>(term: Term<'a>) -> NifResult<String> {
     }
 }
 #[cfg(feature = "real-gpui")]
+pub(crate) fn decode_svg_node<'a>(
+    term: Term<'a>,
+    _tag: GeneratedElementTag,
+) -> NifResult<ElementNode> {
+    let attrs = decode_element_attrs(term)?;
+    let data = attrs.map_get(atoms::data())?.decode::<String>()?;
+    Ok(
+        ElementNode::Svg(SvgNode {
+            id: string_attr(term, atoms::id()),
+            spin_duration: component_non_negative_integer_attr(
+                    term,
+                    atoms::spin_duration(),
+                )?
+                .unwrap_or(0),
+            data,
+            style: decode_style(term)?,
+        }),
+    )
+}
+#[cfg(feature = "real-gpui")]
 pub(crate) fn decode_text_node<'a>(
     term: Term<'a>,
     _tag: GeneratedElementTag,
 ) -> NifResult<ElementNode> {
     Ok(
         ElementNode::Text(TextNode {
+            truncate_start: component_bool_attr(term, atoms::truncate_start())?
+                .unwrap_or(false),
             text: decode_text_children(term)?,
             style: decode_style(term)?,
         }),
@@ -1012,17 +1255,23 @@ pub(crate) struct StyleAttrs {
     pub(crate) white_space: Option<String>,
     pub(crate) text_overflow: Option<String>,
     pub(crate) text_align: Option<String>,
+    pub(crate) preserve_layout_bounds: bool,
+    pub(crate) paint_rounding: Option<String>,
     pub(crate) truncate: bool,
     pub(crate) cursor: Option<String>,
     pub(crate) background: Option<u32>,
     pub(crate) color: Option<u32>,
+    pub(crate) text_decoration: Option<String>,
+    pub(crate) font_family: Option<String>,
     pub(crate) font_size: Option<f32>,
     pub(crate) font_weight: Option<String>,
     pub(crate) line_height: Option<f32>,
     pub(crate) opacity: Option<f32>,
     pub(crate) visibility: Option<String>,
     pub(crate) group: Option<String>,
+    pub(crate) hover_color: Option<u32>,
     pub(crate) hover_background: Option<u32>,
+    pub(crate) group_hover_background: Option<(String, u32)>,
     pub(crate) group_hover_visible: Option<String>,
     pub(crate) group_hover_invisible: Option<String>,
     pub(crate) gap: Option<f32>,
@@ -1047,7 +1296,24 @@ pub(crate) struct StyleAttrs {
     pub(crate) min_height: Option<gpui::DefiniteLength>,
     pub(crate) max_height: Option<gpui::DefiniteLength>,
     pub(crate) border_radius: Option<f32>,
+    pub(crate) border_top_left_radius: Option<f32>,
+    pub(crate) border_top_right_radius: Option<f32>,
+    pub(crate) border_bottom_right_radius: Option<f32>,
+    pub(crate) border_bottom_left_radius: Option<f32>,
     pub(crate) border_width: Option<f32>,
+    pub(crate) border_top_width: Option<f32>,
+    pub(crate) border_right_width: Option<f32>,
+    pub(crate) border_bottom_width: Option<f32>,
+    pub(crate) border_left_width: Option<f32>,
+    pub(crate) box_shadow: Option<Vec<gpui_core::BoxShadowSpec>>,
+    pub(crate) ring_width: Option<f32>,
+    pub(crate) ring_color: Option<u32>,
+    pub(crate) focus_outline_mode: Option<String>,
+    pub(crate) focus_outline_color: Option<u32>,
+    pub(crate) selected_background: Option<u32>,
+    pub(crate) focus_outline_width: Option<f32>,
+    pub(crate) focus_outline_offset: Option<f32>,
+    pub(crate) focus_outline_radius: Option<f32>,
     pub(crate) border_color: Option<u32>,
 }
 #[cfg(feature = "real-gpui")]
@@ -1203,6 +1469,18 @@ pub(crate) fn apply_generated_style_attr<'a>(
             attrs.text_align = value;
             valid
         }
+        value if value == atoms::preserve_layout_bounds() => {
+            let value = atom_eq(term, "true");
+            let valid = atom_eq(term, "true") || atom_eq(term, "false");
+            attrs.preserve_layout_bounds = value;
+            valid
+        }
+        value if value == atoms::paint_rounding() => {
+            let value = atom_string(term);
+            let valid = value.is_some();
+            attrs.paint_rounding = value;
+            valid
+        }
         value if value == atoms::truncate() => {
             let value = atom_eq(term, "true");
             let valid = value;
@@ -1225,6 +1503,18 @@ pub(crate) fn apply_generated_style_attr<'a>(
             let value = color_value(term);
             let valid = value.is_some();
             attrs.color = value;
+            valid
+        }
+        value if value == atoms::text_decoration() => {
+            let value = atom_string(term);
+            let valid = value.is_some();
+            attrs.text_decoration = value;
+            valid
+        }
+        value if value == atoms::font_family() => {
+            let value = atom_string(term);
+            let valid = value.is_some();
+            attrs.font_family = value;
             valid
         }
         value if value == atoms::font_size() => {
@@ -1258,9 +1548,15 @@ pub(crate) fn apply_generated_style_attr<'a>(
             valid
         }
         value if value == atoms::group() => {
-            let value = atom_string(term);
+            let value = group_name_value(term);
             let valid = value.is_some();
             attrs.group = value;
+            valid
+        }
+        value if value == atoms::hover_color() => {
+            let value = color_value(term);
+            let valid = value.is_some();
+            attrs.hover_color = value;
             valid
         }
         value if value == atoms::hover_background() => {
@@ -1269,14 +1565,20 @@ pub(crate) fn apply_generated_style_attr<'a>(
             attrs.hover_background = value;
             valid
         }
+        value if value == atoms::group_hover_background() => {
+            let value = group_color_value(term);
+            let valid = value.is_some();
+            attrs.group_hover_background = value;
+            valid
+        }
         value if value == atoms::group_hover_visible() => {
-            let value = atom_string(term);
+            let value = group_name_value(term);
             let valid = value.is_some();
             attrs.group_hover_visible = value;
             valid
         }
         value if value == atoms::group_hover_invisible() => {
-            let value = atom_string(term);
+            let value = group_name_value(term);
             let valid = value.is_some();
             attrs.group_hover_invisible = value;
             valid
@@ -1413,10 +1715,112 @@ pub(crate) fn apply_generated_style_attr<'a>(
             attrs.border_radius = value;
             valid
         }
+        value if value == atoms::border_top_left_radius() => {
+            let value = radius_value(term);
+            let valid = value.is_some();
+            attrs.border_top_left_radius = value;
+            valid
+        }
+        value if value == atoms::border_top_right_radius() => {
+            let value = radius_value(term);
+            let valid = value.is_some();
+            attrs.border_top_right_radius = value;
+            valid
+        }
+        value if value == atoms::border_bottom_right_radius() => {
+            let value = radius_value(term);
+            let valid = value.is_some();
+            attrs.border_bottom_right_radius = value;
+            valid
+        }
+        value if value == atoms::border_bottom_left_radius() => {
+            let value = radius_value(term);
+            let valid = value.is_some();
+            attrs.border_bottom_left_radius = value;
+            valid
+        }
         value if value == atoms::border_width() => {
             let value = px_value(term);
             let valid = value.is_some();
             attrs.border_width = value;
+            valid
+        }
+        value if value == atoms::border_top_width() => {
+            let value = px_value(term);
+            let valid = value.is_some();
+            attrs.border_top_width = value;
+            valid
+        }
+        value if value == atoms::border_right_width() => {
+            let value = px_value(term);
+            let valid = value.is_some();
+            attrs.border_right_width = value;
+            valid
+        }
+        value if value == atoms::border_bottom_width() => {
+            let value = px_value(term);
+            let valid = value.is_some();
+            attrs.border_bottom_width = value;
+            valid
+        }
+        value if value == atoms::border_left_width() => {
+            let value = px_value(term);
+            let valid = value.is_some();
+            attrs.border_left_width = value;
+            valid
+        }
+        value if value == atoms::box_shadow() => {
+            let value = box_shadows_value(term);
+            let valid = value.is_some();
+            attrs.box_shadow = value;
+            valid
+        }
+        value if value == atoms::ring_width() => {
+            let value = px_value(term);
+            let valid = value.is_some();
+            attrs.ring_width = value;
+            valid
+        }
+        value if value == atoms::ring_color() => {
+            let value = color_value(term);
+            let valid = value.is_some();
+            attrs.ring_color = value;
+            valid
+        }
+        value if value == atoms::focus_outline_mode() => {
+            let value = atom_string(term);
+            let valid = value.is_some();
+            attrs.focus_outline_mode = value;
+            valid
+        }
+        value if value == atoms::focus_outline_color() => {
+            let value = color_value(term);
+            let valid = value.is_some();
+            attrs.focus_outline_color = value;
+            valid
+        }
+        value if value == atoms::selected_background() => {
+            let value = color_value(term);
+            let valid = value.is_some();
+            attrs.selected_background = value;
+            valid
+        }
+        value if value == atoms::focus_outline_width() => {
+            let value = px_value(term);
+            let valid = value.is_some();
+            attrs.focus_outline_width = value;
+            valid
+        }
+        value if value == atoms::focus_outline_offset() => {
+            let value = px_value(term);
+            let valid = value.is_some();
+            attrs.focus_outline_offset = value;
+            valid
+        }
+        value if value == atoms::focus_outline_radius() => {
+            let value = radius_value(term);
+            let valid = value.is_some();
+            attrs.focus_outline_radius = value;
             valid
         }
         value if value == atoms::border_color() => {
@@ -1639,6 +2043,18 @@ pub(crate) fn apply_generated_render_styles(
         }
         _ => {}
     };
+    if style.preserve_layout_bounds {
+        element = element.preserve_layout_bounds();
+    }
+    match style.paint_rounding.as_deref() {
+        Some("half_up") => {
+            element = element.paint_rounding_half_up();
+        }
+        Some("half_toward_zero") => {
+            element = element.paint_rounding_half_toward_zero();
+        }
+        _ => {}
+    };
     if style.truncate {
         element = element.truncate();
     }
@@ -1669,6 +2085,18 @@ pub(crate) fn apply_generated_render_styles(
     match style.color {
         Some(value) => {
             element = element.text_color(gpui::rgba(value));
+        }
+        _ => {}
+    };
+    match style.text_decoration.as_deref() {
+        Some("underline") => {
+            element = element.underline();
+        }
+        _ => {}
+    };
+    match style.font_family {
+        Some(value) => {
+            element = element.font_family(value);
         }
         _ => {}
     };
@@ -1723,9 +2151,11 @@ pub(crate) fn apply_generated_render_styles(
         }
         _ => {}
     };
-    match style.hover_background {
+    match style.group_hover_background {
         Some(value) => {
-            element = element.hover(|refinement| refinement.bg(gpui::rgba(value)));
+            let (group, color) = value;
+            element = element
+                .group_hover(group, |refinement| refinement.bg(gpui::rgba(color)));
         }
         _ => {}
     };
@@ -1873,9 +2303,86 @@ pub(crate) fn apply_generated_render_styles(
         }
         _ => {}
     };
+    match style.border_top_left_radius {
+        Some(value) => {
+            element = element.rounded_tl(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_top_right_radius {
+        Some(value) => {
+            element = element.rounded_tr(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_bottom_right_radius {
+        Some(value) => {
+            element = element.rounded_br(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_bottom_left_radius {
+        Some(value) => {
+            element = element.rounded_bl(gpui::px(value));
+        }
+        _ => {}
+    };
     match style.border_width {
         Some(value) => {
             element = element.border(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_top_width {
+        Some(value) => {
+            element = element.border_t(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_right_width {
+        Some(value) => {
+            element = element.border_r(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_bottom_width {
+        Some(value) => {
+            element = element.border_b(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_left_width {
+        Some(value) => {
+            element = element.border_l(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.box_shadow {
+        Some(value) => {
+            let shadows = value
+                .into_iter()
+                .rev()
+                .map(|(x, y, blur, spread, color)| {
+                    gpui::BoxShadow::new(
+                            gpui::px(x),
+                            gpui::px(y),
+                            gpui::rgba(color).into(),
+                        )
+                        .blur_radius(gpui::px(blur / 2.0))
+                        .spread_radius(gpui::px(spread))
+                })
+                .collect();
+            element = element.shadow(shadows);
+        }
+        _ => {}
+    };
+    match style.ring_color {
+        Some(value) => {
+            element = element
+                .ring(
+                    gpui::px(style.ring_width.unwrap_or(1.0)),
+                    gpui::rgba(value).into(),
+                );
         }
         _ => {}
     };
@@ -1885,6 +2392,25 @@ pub(crate) fn apply_generated_render_styles(
         }
         _ => {}
     };
+    if style.hover_color.is_some() || style.hover_background.is_some() {
+        element = element
+            .hover(|refinement| {
+                let mut refinement = refinement;
+                match style.hover_color {
+                    Some(value) => {
+                        refinement = refinement.text_color(gpui::rgba(value));
+                    }
+                    _ => {}
+                };
+                match style.hover_background {
+                    Some(value) => {
+                        refinement = refinement.bg(gpui::rgba(value));
+                    }
+                    _ => {}
+                };
+                refinement
+            });
+    }
     element
 }
 #[cfg(feature = "real-gpui")]
@@ -1926,6 +2452,9 @@ pub(crate) enum AccessibilityRole {
     Link,
     List,
     ListItem,
+    Menu,
+    MenuItem,
+    MenuItemCheckbox,
     Progress,
     Radio,
     Slider,
@@ -1982,6 +2511,9 @@ pub(crate) fn decode_accessibility_role<'a>(
                 "link" => Ok(Some(AccessibilityRole::Link)),
                 "list" => Ok(Some(AccessibilityRole::List)),
                 "list_item" => Ok(Some(AccessibilityRole::ListItem)),
+                "menu" => Ok(Some(AccessibilityRole::Menu)),
+                "menu_item" => Ok(Some(AccessibilityRole::MenuItem)),
+                "menu_item_checkbox" => Ok(Some(AccessibilityRole::MenuItemCheckbox)),
                 "progress" => Ok(Some(AccessibilityRole::Progress)),
                 "radio" => Ok(Some(AccessibilityRole::Radio)),
                 "slider" => Ok(Some(AccessibilityRole::Slider)),
@@ -2065,6 +2597,9 @@ impl AccessibilityRole {
             AccessibilityRole::Link => gpui::Role::Link,
             AccessibilityRole::List => gpui::Role::List,
             AccessibilityRole::ListItem => gpui::Role::ListItem,
+            AccessibilityRole::Menu => gpui::Role::Menu,
+            AccessibilityRole::MenuItem => gpui::Role::MenuItem,
+            AccessibilityRole::MenuItemCheckbox => gpui::Role::MenuItemCheckBox,
             AccessibilityRole::Progress => gpui::Role::ProgressIndicator,
             AccessibilityRole::Radio => gpui::Role::RadioButton,
             AccessibilityRole::Slider => gpui::Role::Slider,
@@ -2113,6 +2648,9 @@ impl AccessibilityRole {
             AccessibilityRole::Link => true,
             AccessibilityRole::List => false,
             AccessibilityRole::ListItem => false,
+            AccessibilityRole::Menu => false,
+            AccessibilityRole::MenuItem => true,
+            AccessibilityRole::MenuItemCheckbox => true,
             AccessibilityRole::Progress => false,
             AccessibilityRole::Radio => true,
             AccessibilityRole::Slider => false,
@@ -2570,12 +3108,63 @@ pub(crate) fn decode_generated_split_component<'a>(
 #[derive(Clone, Debug)]
 #[cfg(feature = "real-gpui")]
 #[allow(dead_code)]
+pub(crate) struct PanZoomComponentNode {
+    pub(crate) style: StyleAttrs,
+    pub(crate) id: String,
+    pub(crate) label: String,
+    pub(crate) content_width: f64,
+    pub(crate) content_height: f64,
+    pub(crate) pan_x: f64,
+    pub(crate) pan_y: f64,
+    pub(crate) scale: f64,
+    pub(crate) min_scale: f64,
+    pub(crate) max_scale: f64,
+    pub(crate) zoomable: bool,
+    pub(crate) reset_request: u64,
+    pub(crate) children: Vec<ElementNode>,
+    pub(crate) change: Option<String>,
+    pub(crate) click: Option<String>,
+}
+#[cfg(feature = "real-gpui")]
+#[allow(clippy::redundant_field_names)]
+#[allow(clippy::useless_vec)]
+pub(crate) fn decode_generated_pan_zoom_component<'a>(
+    term: Term<'a>,
+) -> NifResult<PanZoomComponentNode> {
+    Ok(PanZoomComponentNode {
+        style: decode_style(term)?,
+        id: component_required_string_attr(term, atoms::id())?,
+        label: component_required_string_attr(term, atoms::label())?,
+        content_width: component_positive_number_attr(term, atoms::content_width())?
+            .unwrap_or(1.0),
+        content_height: component_positive_number_attr(term, atoms::content_height())?
+            .unwrap_or(1.0),
+        pan_x: component_number_attr(term, atoms::pan_x())?.unwrap_or(0.0),
+        pan_y: component_number_attr(term, atoms::pan_y())?.unwrap_or(0.0),
+        scale: component_positive_number_attr(term, atoms::scale())?.unwrap_or(1.0),
+        min_scale: component_positive_number_attr(term, atoms::min_scale())?
+            .unwrap_or(0.25),
+        max_scale: component_positive_number_attr(term, atoms::max_scale())?
+            .unwrap_or(10.0),
+        zoomable: component_bool_attr(term, atoms::zoomable())?.unwrap_or(true),
+        reset_request: component_non_negative_integer_attr(term, atoms::reset_request())?
+            .unwrap_or(0),
+        children: decode_children(term)?,
+        change: component_string_attr(term, atoms::phx_change())?,
+        click: component_string_attr(term, atoms::phx_click())?,
+    })
+}
+#[derive(Clone, Debug)]
+#[cfg(feature = "real-gpui")]
+#[allow(dead_code)]
 pub(crate) struct ButtonComponentNode {
     pub(crate) style: StyleAttrs,
     pub(crate) id: String,
     pub(crate) label: String,
     pub(crate) clipboard_text: Option<String>,
+    pub(crate) show_label: bool,
     pub(crate) file_prompt: Option<String>,
+    pub(crate) file_multiple: bool,
     pub(crate) file_max_bytes: u64,
     pub(crate) variant: Option<String>,
     pub(crate) size: Option<String>,
@@ -2601,7 +3190,10 @@ pub(crate) fn decode_generated_button_component<'a>(
         id: component_id(term)?,
         label: component_required_string_attr(term, atoms::label())?,
         clipboard_text: component_string_attr(term, atoms::clipboard_text())?,
+        show_label: component_bool_attr(term, atoms::show_label())?.unwrap_or(true),
         file_prompt: component_string_attr(term, atoms::file_prompt())?,
+        file_multiple: component_bool_attr(term, atoms::file_multiple())?
+            .unwrap_or(false),
         file_max_bytes: component_positive_integer_attr(term, atoms::file_max_bytes())?
             .unwrap_or(10485760),
         variant: component_enum_attr(
@@ -2660,6 +3252,17 @@ pub(crate) struct PopoverComponentNode {
     pub(crate) id: String,
     pub(crate) label: String,
     pub(crate) open: bool,
+    pub(crate) open_on_hover: bool,
+    pub(crate) focus_on_open: bool,
+    pub(crate) trigger_passthrough: bool,
+    pub(crate) hover_delay: f64,
+    pub(crate) close_delay: f64,
+    pub(crate) anchor_x: Option<f64>,
+    pub(crate) anchor_y: Option<f64>,
+    pub(crate) anchor_width: Option<f64>,
+    pub(crate) anchor_height: Option<f64>,
+    pub(crate) anchor_hovered: bool,
+    pub(crate) parent_popover: Option<String>,
     pub(crate) anchor: Option<String>,
     pub(crate) appearance: bool,
     pub(crate) closable: bool,
@@ -2677,6 +3280,21 @@ pub(crate) fn decode_generated_popover_component<'a>(
         id: component_id(term)?,
         label: component_required_string_attr(term, atoms::label())?,
         open: component_bool_attr(term, atoms::open())?.unwrap_or(false),
+        open_on_hover: component_bool_attr(term, atoms::open_on_hover())?
+            .unwrap_or(false),
+        focus_on_open: component_bool_attr(term, atoms::focus_on_open())?
+            .unwrap_or(true),
+        trigger_passthrough: component_bool_attr(term, atoms::trigger_passthrough())?
+            .unwrap_or(false),
+        hover_delay: component_number_attr(term, atoms::hover_delay())?.unwrap_or(0.0),
+        close_delay: component_number_attr(term, atoms::close_delay())?.unwrap_or(200.0),
+        anchor_x: component_number_attr(term, atoms::anchor_x())?,
+        anchor_y: component_number_attr(term, atoms::anchor_y())?,
+        anchor_width: component_number_attr(term, atoms::anchor_width())?,
+        anchor_height: component_number_attr(term, atoms::anchor_height())?,
+        anchor_hovered: component_bool_attr(term, atoms::anchor_hovered())?
+            .unwrap_or(false),
+        parent_popover: component_string_attr(term, atoms::parent_popover())?,
         anchor: match component_enum_attr(
             term,
             atoms::anchor(),
@@ -2738,7 +3356,13 @@ pub(crate) struct TooltipComponentNode {
     pub(crate) id: String,
     pub(crate) text: String,
     pub(crate) delay: f64,
+    pub(crate) close_delay: f64,
     pub(crate) hoverable: bool,
+    pub(crate) keyboard: bool,
+    pub(crate) appearance: bool,
+    pub(crate) placement: Option<String>,
+    pub(crate) offset: f64,
+    pub(crate) collision_padding: f64,
     pub(crate) children: Vec<ElementNode>,
 }
 #[cfg(feature = "real-gpui")]
@@ -2752,8 +3376,66 @@ pub(crate) fn decode_generated_tooltip_component<'a>(
         id: component_id(term)?,
         text: component_string_attr(term, atoms::text())?.unwrap_or_default(),
         delay: component_number_attr(term, atoms::delay())?.unwrap_or(500.0),
+        close_delay: component_number_attr(term, atoms::close_delay())?.unwrap_or(500.0),
         hoverable: component_bool_attr(term, atoms::hoverable())?.unwrap_or(false),
+        keyboard: component_bool_attr(term, atoms::keyboard())?.unwrap_or(false),
+        appearance: component_bool_attr(term, atoms::appearance())?.unwrap_or(true),
+        placement: match component_enum_attr(
+            term,
+            atoms::placement(),
+            &vec![
+                "cursor", "top", "top_start", "top_end", "bottom", "bottom_start",
+                "bottom_end", "left", "right"
+            ],
+        )? {
+            Some(value) => Some(value),
+            None => Some("cursor".to_string()),
+        },
+        offset: component_number_attr(term, atoms::offset())?.unwrap_or(4.0),
+        collision_padding: component_number_attr(term, atoms::collision_padding())?
+            .unwrap_or(4.0),
         children: decode_children(term)?,
+    })
+}
+#[derive(Clone, Debug)]
+#[cfg(feature = "real-gpui")]
+#[allow(dead_code)]
+pub(crate) struct TooltipContentComponentNode {
+    pub(crate) style: StyleAttrs,
+    pub(crate) text: String,
+    pub(crate) children: Vec<ElementNode>,
+}
+#[cfg(feature = "real-gpui")]
+#[allow(clippy::redundant_field_names)]
+#[allow(clippy::useless_vec)]
+pub(crate) fn decode_generated_tooltip_content_component<'a>(
+    term: Term<'a>,
+) -> NifResult<TooltipContentComponentNode> {
+    Ok(TooltipContentComponentNode {
+        style: decode_style(term)?,
+        text: component_string_attr(term, atoms::text())?.unwrap_or_default(),
+        children: decode_children(term)?,
+    })
+}
+#[derive(Clone, Debug)]
+#[cfg(feature = "real-gpui")]
+#[allow(dead_code)]
+pub(crate) struct TooltipShortcutComponentNode {
+    pub(crate) style: StyleAttrs,
+    pub(crate) text: String,
+    pub(crate) letter_spacing: f64,
+}
+#[cfg(feature = "real-gpui")]
+#[allow(clippy::redundant_field_names)]
+#[allow(clippy::useless_vec)]
+pub(crate) fn decode_generated_tooltip_shortcut_component<'a>(
+    term: Term<'a>,
+) -> NifResult<TooltipShortcutComponentNode> {
+    Ok(TooltipShortcutComponentNode {
+        style: decode_style(term)?,
+        text: component_string_attr(term, atoms::text())?.unwrap_or_default(),
+        letter_spacing: component_number_attr(term, atoms::letter_spacing())?
+            .unwrap_or(0.0),
     })
 }
 #[derive(Clone, Debug)]
@@ -2783,10 +3465,13 @@ pub(crate) struct DialogComponentNode {
     pub(crate) open: bool,
     pub(crate) title: String,
     pub(crate) show_title: bool,
+    pub(crate) fullscreen: bool,
     pub(crate) width: f64,
     pub(crate) margin_top: Option<f64>,
+    pub(crate) margin_top_ratio: Option<f64>,
     pub(crate) overlay: bool,
     pub(crate) closable: bool,
+    pub(crate) pointer_dismiss: bool,
     pub(crate) keyboard: bool,
     pub(crate) close_button: bool,
     pub(crate) children: Vec<ElementNode>,
@@ -2804,10 +3489,14 @@ pub(crate) fn decode_generated_dialog_component<'a>(
         open: component_bool_attr(term, atoms::open())?.unwrap_or(false),
         title: component_required_string_attr(term, atoms::title())?,
         show_title: component_bool_attr(term, atoms::show_title())?.unwrap_or(true),
+        fullscreen: component_bool_attr(term, atoms::fullscreen())?.unwrap_or(false),
         width: component_number_attr(term, atoms::width())?.unwrap_or(448.0),
         margin_top: component_number_attr(term, atoms::margin_top())?,
+        margin_top_ratio: component_number_attr(term, atoms::margin_top_ratio())?,
         overlay: component_bool_attr(term, atoms::overlay())?.unwrap_or(true),
         closable: component_bool_attr(term, atoms::closable())?.unwrap_or(true),
+        pointer_dismiss: component_bool_attr(term, atoms::pointer_dismiss())?
+            .unwrap_or(true),
         keyboard: component_bool_attr(term, atoms::keyboard())?.unwrap_or(true),
         close_button: component_bool_attr(term, atoms::close_button())?.unwrap_or(true),
         children: decode_children(term)?,
@@ -3028,9 +3717,15 @@ pub(crate) struct InputComponentNode {
     pub(crate) label: String,
     pub(crate) value: String,
     pub(crate) focus_request: u64,
+    pub(crate) insert_request: u64,
+    pub(crate) insert_text: Option<String>,
+    pub(crate) insert_match: Option<String>,
+    pub(crate) insert_on_new_line: bool,
     pub(crate) placeholder: Option<String>,
     pub(crate) appearance: bool,
     pub(crate) multiline: bool,
+    pub(crate) submit_on_enter: bool,
+    pub(crate) capture_keys: Vec<String>,
     pub(crate) max_rows: u64,
     pub(crate) size: Option<String>,
     pub(crate) disabled: bool,
@@ -3038,8 +3733,10 @@ pub(crate) struct InputComponentNode {
     pub(crate) masked: bool,
     pub(crate) loading: bool,
     pub(crate) change: Option<String>,
+    pub(crate) inserted: Option<String>,
     pub(crate) submit: Option<String>,
     pub(crate) keydown: Option<String>,
+    pub(crate) keystroke: Option<String>,
     pub(crate) focus: Option<String>,
     pub(crate) blur: Option<String>,
 }
@@ -3056,9 +3753,21 @@ pub(crate) fn decode_generated_input_component<'a>(
         value: component_string_attr(term, atoms::value())?.unwrap_or_default(),
         focus_request: component_non_negative_integer_attr(term, atoms::focus_request())?
             .unwrap_or(0),
+        insert_request: component_non_negative_integer_attr(
+                term,
+                atoms::insert_request(),
+            )?
+            .unwrap_or(0),
+        insert_text: component_string_attr(term, atoms::insert_text())?,
+        insert_match: component_string_attr(term, atoms::insert_match())?,
+        insert_on_new_line: component_bool_attr(term, atoms::insert_on_new_line())?
+            .unwrap_or(false),
         placeholder: component_string_attr(term, atoms::placeholder())?,
         appearance: component_bool_attr(term, atoms::appearance())?.unwrap_or(true),
         multiline: component_bool_attr(term, atoms::multiline())?.unwrap_or(false),
+        submit_on_enter: component_bool_attr(term, atoms::submit_on_enter())?
+            .unwrap_or(true),
+        capture_keys: component_string_list_attr(term, atoms::capture_keys())?,
         max_rows: component_positive_integer_attr(term, atoms::max_rows())?
             .unwrap_or(16),
         size: component_enum_attr(term, atoms::size(), &vec!["xs", "sm", "md", "lg"])?,
@@ -3067,8 +3776,10 @@ pub(crate) fn decode_generated_input_component<'a>(
         masked: component_bool_attr(term, atoms::masked())?.unwrap_or(false),
         loading: component_bool_attr(term, atoms::loading())?.unwrap_or(false),
         change: component_string_attr(term, atoms::phx_change())?,
+        inserted: component_string_attr(term, atoms::phx_inserted())?,
         submit: component_string_attr(term, atoms::phx_submit())?,
         keydown: component_string_attr(term, atoms::phx_keydown())?,
+        keystroke: component_string_attr(term, atoms::phx_keystroke())?,
         focus: component_string_attr(term, atoms::phx_focus())?,
         blur: component_string_attr(term, atoms::phx_blur())?,
     })
@@ -3359,6 +4070,10 @@ pub(crate) struct VirtualCollectionComponentNode {
     pub(crate) label: Option<String>,
     pub(crate) alignment: Option<String>,
     pub(crate) overdraw: f64,
+    pub(crate) measure_all: bool,
+    pub(crate) scrollbar: bool,
+    pub(crate) scrollbar_gutter: Option<String>,
+    pub(crate) reveal_offset: f64,
     pub(crate) reveal: Option<String>,
     pub(crate) reveal_request: u64,
     pub(crate) reveal_strategy: Option<String>,
@@ -3366,6 +4081,8 @@ pub(crate) struct VirtualCollectionComponentNode {
     pub(crate) follow_request: u64,
     pub(crate) children: Vec<ElementNode>,
     pub(crate) range: Option<String>,
+    pub(crate) scroll: Option<String>,
+    pub(crate) measure: Option<String>,
 }
 #[cfg(feature = "real-gpui")]
 #[allow(clippy::redundant_field_names)]
@@ -3386,6 +4103,18 @@ pub(crate) fn decode_generated_virtual_collection_component<'a>(
             None => Some("top".to_string()),
         },
         overdraw: component_number_attr(term, atoms::overdraw())?.unwrap_or(256.0),
+        measure_all: component_bool_attr(term, atoms::measure_all())?.unwrap_or(false),
+        scrollbar: component_bool_attr(term, atoms::scrollbar())?.unwrap_or(false),
+        scrollbar_gutter: match component_enum_attr(
+            term,
+            atoms::scrollbar_gutter(),
+            &vec!["stable", "auto"],
+        )? {
+            Some(value) => Some(value),
+            None => Some("stable".to_string()),
+        },
+        reveal_offset: component_number_attr(term, atoms::reveal_offset())?
+            .unwrap_or(0.0),
         reveal: component_string_attr(term, atoms::reveal())?,
         reveal_request: component_non_negative_integer_attr(
                 term,
@@ -3415,6 +4144,8 @@ pub(crate) fn decode_generated_virtual_collection_component<'a>(
             .unwrap_or(0),
         children: decode_children(term)?,
         range: component_string_attr(term, atoms::phx_range())?,
+        scroll: component_string_attr(term, atoms::phx_scroll())?,
+        measure: component_string_attr(term, atoms::phx_measure())?,
     })
 }
 #[derive(Clone, Debug)]
@@ -3449,8 +4180,30 @@ pub(crate) struct RichTextComponentNode {
     pub(crate) label: Option<String>,
     pub(crate) text: String,
     pub(crate) runs: Vec<RichTextRunNode>,
+    pub(crate) scroll_group: Option<String>,
+    pub(crate) scroll_pane: String,
+    pub(crate) scroll_revision: u64,
+    pub(crate) scrollbar: bool,
+    pub(crate) scrollbar_visible: bool,
+    pub(crate) scrollbar_placement: Option<String>,
+    pub(crate) scroll_padding: f64,
+    pub(crate) scrollbar_gutter: f64,
+    pub(crate) tab_size: u64,
+    pub(crate) line_height_snap: Option<String>,
+    pub(crate) hit_test_x: Option<f64>,
+    pub(crate) hit_test_y: Option<f64>,
+    pub(crate) hit_test_request: u64,
+    pub(crate) geometry_ranges: Vec<TextRange>,
+    pub(crate) reveal_start: Option<u64>,
+    pub(crate) reveal_end: Option<u64>,
+    pub(crate) reveal_request: u64,
     pub(crate) selectable: bool,
     pub(crate) link: Option<String>,
+    pub(crate) link_hover: Option<String>,
+    pub(crate) scroll: Option<String>,
+    pub(crate) change: Option<String>,
+    pub(crate) hit_test: Option<String>,
+    pub(crate) range_geometry: Option<String>,
 }
 #[cfg(feature = "real-gpui")]
 #[allow(clippy::redundant_field_names)]
@@ -3464,8 +4217,61 @@ pub(crate) fn decode_generated_rich_text_component<'a>(
         label: component_string_attr(term, atoms::label())?,
         text: component_string_attr(term, atoms::text())?.unwrap_or_default(),
         runs: decode_rich_text_runs(term)?,
+        scroll_group: component_string_attr(term, atoms::scroll_group())?,
+        scroll_pane: component_string_attr(term, atoms::scroll_pane())?
+            .unwrap_or_default(),
+        scroll_revision: component_non_negative_integer_attr(
+                term,
+                atoms::scroll_revision(),
+            )?
+            .unwrap_or(0),
+        scrollbar: component_bool_attr(term, atoms::scrollbar())?.unwrap_or(false),
+        scrollbar_visible: component_bool_attr(term, atoms::scrollbar_visible())?
+            .unwrap_or(true),
+        scrollbar_placement: match component_enum_attr(
+            term,
+            atoms::scrollbar_placement(),
+            &vec!["overlay", "gutter", "outside"],
+        )? {
+            Some(value) => Some(value),
+            None => Some("overlay".to_string()),
+        },
+        scroll_padding: component_number_attr(term, atoms::scroll_padding())?
+            .unwrap_or(8.0),
+        scrollbar_gutter: component_number_attr(term, atoms::scrollbar_gutter())?
+            .unwrap_or(0.0),
+        tab_size: component_non_negative_integer_attr(term, atoms::tab_size())?
+            .unwrap_or(2),
+        line_height_snap: match component_enum_attr(
+            term,
+            atoms::line_height_snap(),
+            &vec!["device", "none"],
+        )? {
+            Some(value) => Some(value),
+            None => Some("device".to_string()),
+        },
+        hit_test_x: component_number_attr(term, atoms::hit_test_x())?,
+        hit_test_y: component_number_attr(term, atoms::hit_test_y())?,
+        hit_test_request: component_non_negative_integer_attr(
+                term,
+                atoms::hit_test_request(),
+            )?
+            .unwrap_or(0),
+        geometry_ranges: text_ranges_attr(term, atoms::geometry_ranges())?,
+        reveal_start: component_non_negative_integer_attr(term, atoms::reveal_start())?,
+        reveal_end: component_non_negative_integer_attr(term, atoms::reveal_end())?,
+        reveal_request: component_non_negative_integer_attr(
+                term,
+                atoms::reveal_request(),
+            )?
+            .unwrap_or(0),
         selectable: component_bool_attr(term, atoms::selectable())?.unwrap_or(true),
         link: component_string_attr(term, atoms::phx_link())?,
+        link_hover: component_string_attr(term, atoms::phx_link_hover())?,
+        scroll: component_string_attr(term, atoms::phx_scroll())?,
+        change: component_string_attr(term, atoms::phx_change())?,
+        hit_test: component_string_attr(term, atoms::phx_hit_test())?,
+        range_geometry: component_string_attr(term, atoms::phx_range_geometry_change())?,
     })
 }
 #[derive(Clone, Debug)]
@@ -3610,6 +4416,9 @@ pub(crate) struct TreeComponentNode {
     pub(crate) id: String,
     pub(crate) label: Option<String>,
     pub(crate) selected: Option<String>,
+    pub(crate) multiple: bool,
+    pub(crate) selected_items: Vec<String>,
+    pub(crate) selection_items: Vec<String>,
     pub(crate) selected_index: Option<u64>,
     pub(crate) reveal: Option<String>,
     pub(crate) reveal_index: Option<u64>,
@@ -3618,11 +4427,16 @@ pub(crate) struct TreeComponentNode {
     pub(crate) offset: u64,
     pub(crate) overscan: u64,
     pub(crate) item_height: f64,
+    pub(crate) toggle_on_click: bool,
+    pub(crate) select_on_navigation: bool,
     pub(crate) disabled: bool,
     pub(crate) children: Vec<ElementNode>,
     pub(crate) change: Option<String>,
     pub(crate) toggle: Option<String>,
+    pub(crate) navigation_change: Option<String>,
+    pub(crate) selection_change: Option<String>,
     pub(crate) range: Option<String>,
+    pub(crate) open: Option<String>,
 }
 #[cfg(feature = "real-gpui")]
 #[allow(clippy::redundant_field_names)]
@@ -3635,6 +4449,9 @@ pub(crate) fn decode_generated_tree_component<'a>(
         id: component_id(term)?,
         label: component_string_attr(term, atoms::label())?,
         selected: component_string_attr(term, atoms::selected())?,
+        multiple: component_bool_attr(term, atoms::multiple())?.unwrap_or(false),
+        selected_items: component_string_list_attr(term, atoms::selected_items())?,
+        selection_items: component_string_list_attr(term, atoms::selection_items())?,
         selected_index: component_non_negative_integer_attr(
             term,
             atoms::selected_index(),
@@ -3656,11 +4473,18 @@ pub(crate) fn decode_generated_tree_component<'a>(
             .unwrap_or(8),
         item_height: component_positive_number_attr(term, atoms::item_height())?
             .unwrap_or(40.0),
+        toggle_on_click: component_bool_attr(term, atoms::toggle_on_click())?
+            .unwrap_or(false),
+        select_on_navigation: component_bool_attr(term, atoms::select_on_navigation())?
+            .unwrap_or(true),
         disabled: component_bool_attr(term, atoms::disabled())?.unwrap_or(false),
         children: decode_children(term)?,
         change: component_string_attr(term, atoms::phx_change())?,
         toggle: component_string_attr(term, atoms::phx_toggle())?,
+        navigation_change: component_string_attr(term, atoms::phx_navigation_change())?,
+        selection_change: component_string_attr(term, atoms::phx_selection_change())?,
         range: component_string_attr(term, atoms::phx_range())?,
+        open: component_string_attr(term, atoms::phx_open())?,
     })
 }
 #[derive(Clone, Debug)]
@@ -4121,12 +4945,15 @@ pub(crate) enum ElementNode {
     DropTargetComponent(DropTargetComponentNode),
     DragSourceComponent(DragSourceComponentNode),
     SplitComponent(SplitComponentNode),
+    PanZoomComponent(PanZoomComponentNode),
     ButtonComponent(ButtonComponentNode),
     ProgressComponent(ProgressComponentNode),
     PopoverComponent(PopoverComponentNode),
     PopoverTriggerComponent(PopoverTriggerComponentNode),
     PopoverContentComponent(PopoverContentComponentNode),
     TooltipComponent(TooltipComponentNode),
+    TooltipContentComponent(TooltipContentComponentNode),
+    TooltipShortcutComponent(TooltipShortcutComponentNode),
     TooltipTriggerComponent(TooltipTriggerComponentNode),
     DialogComponent(DialogComponentNode),
     DialogTriggerComponent(DialogTriggerComponentNode),
@@ -4167,6 +4994,7 @@ pub(crate) enum ElementNode {
     TabsComponent(TabsComponentNode),
     SliderComponent(SliderComponentNode),
     Image(ImageNode),
+    Svg(SvgNode),
     Text(TextNode),
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4181,6 +5009,7 @@ pub enum GeneratedElementTag {
     Item,
     TextSurface,
     TextInput,
+    Svg,
     Img,
     Text,
     UiTerminal,
@@ -4192,12 +5021,15 @@ pub enum GeneratedElementTag {
     UiDropTarget,
     UiDragSource,
     UiSplit,
+    UiPanZoom,
     UiButton,
     UiProgress,
     UiPopover,
     UiPopoverTrigger,
     UiPopoverContent,
     UiTooltip,
+    UiTooltipContent,
+    UiTooltipShortcut,
     UiTooltipTrigger,
     UiDialog,
     UiDialogTrigger,
@@ -4251,6 +5083,7 @@ pub fn decode_generated_element_tag(tag: &str) -> GeneratedElementTag {
         "item" => GeneratedElementTag::Item,
         "text_surface" => GeneratedElementTag::TextSurface,
         "text_input" => GeneratedElementTag::TextInput,
+        "svg" => GeneratedElementTag::Svg,
         "img" => GeneratedElementTag::Img,
         "text" => GeneratedElementTag::Text,
         "ui_terminal" => GeneratedElementTag::UiTerminal,
@@ -4262,12 +5095,15 @@ pub fn decode_generated_element_tag(tag: &str) -> GeneratedElementTag {
         "ui_drop_target" => GeneratedElementTag::UiDropTarget,
         "ui_drag_source" => GeneratedElementTag::UiDragSource,
         "ui_split" => GeneratedElementTag::UiSplit,
+        "ui_pan_zoom" => GeneratedElementTag::UiPanZoom,
         "ui_button" => GeneratedElementTag::UiButton,
         "ui_progress" => GeneratedElementTag::UiProgress,
         "ui_popover" => GeneratedElementTag::UiPopover,
         "ui_popover_trigger" => GeneratedElementTag::UiPopoverTrigger,
         "ui_popover_content" => GeneratedElementTag::UiPopoverContent,
         "ui_tooltip" => GeneratedElementTag::UiTooltip,
+        "ui_tooltip_content" => GeneratedElementTag::UiTooltipContent,
+        "ui_tooltip_shortcut" => GeneratedElementTag::UiTooltipShortcut,
         "ui_tooltip_trigger" => GeneratedElementTag::UiTooltipTrigger,
         "ui_dialog" => GeneratedElementTag::UiDialog,
         "ui_dialog_trigger" => GeneratedElementTag::UiDialogTrigger,
@@ -4322,6 +5158,7 @@ pub fn generated_component_kind(tag: GeneratedElementTag) -> GeneratedComponentK
         GeneratedElementTag::Item => GeneratedComponentKind::Container,
         GeneratedElementTag::TextSurface => GeneratedComponentKind::TextSurface,
         GeneratedElementTag::TextInput => GeneratedComponentKind::Input,
+        GeneratedElementTag::Svg => GeneratedComponentKind::Svg,
         GeneratedElementTag::Img => GeneratedComponentKind::Image,
         GeneratedElementTag::Text => GeneratedComponentKind::Text,
         GeneratedElementTag::UiTerminal => GeneratedComponentKind::TerminalComponent,
@@ -4337,6 +5174,7 @@ pub fn generated_component_kind(tag: GeneratedElementTag) -> GeneratedComponentK
         GeneratedElementTag::UiDropTarget => GeneratedComponentKind::DropTargetComponent,
         GeneratedElementTag::UiDragSource => GeneratedComponentKind::DragSourceComponent,
         GeneratedElementTag::UiSplit => GeneratedComponentKind::SplitComponent,
+        GeneratedElementTag::UiPanZoom => GeneratedComponentKind::PanZoomComponent,
         GeneratedElementTag::UiButton => GeneratedComponentKind::ButtonComponent,
         GeneratedElementTag::UiProgress => GeneratedComponentKind::ProgressComponent,
         GeneratedElementTag::UiPopover => GeneratedComponentKind::PopoverComponent,
@@ -4347,6 +5185,12 @@ pub fn generated_component_kind(tag: GeneratedElementTag) -> GeneratedComponentK
             GeneratedComponentKind::PopoverContentComponent
         }
         GeneratedElementTag::UiTooltip => GeneratedComponentKind::TooltipComponent,
+        GeneratedElementTag::UiTooltipContent => {
+            GeneratedComponentKind::TooltipContentComponent
+        }
+        GeneratedElementTag::UiTooltipShortcut => {
+            GeneratedComponentKind::TooltipShortcutComponent
+        }
         GeneratedElementTag::UiTooltipTrigger => {
             GeneratedComponentKind::TooltipTriggerComponent
         }
@@ -4435,6 +5279,7 @@ pub(crate) fn decode_generated_element_node<'a>(
         GeneratedComponentKind::AnchoredLayer => decode_anchored_layer_node(term, tag),
         GeneratedComponentKind::TextSurface => decode_text_surface_node(term, tag),
         GeneratedComponentKind::Input => decode_input_node(term, tag),
+        GeneratedComponentKind::Svg => decode_svg_node(term, tag),
         GeneratedComponentKind::Image => decode_image_node(term, tag),
         GeneratedComponentKind::Text => decode_text_node(term, tag),
         GeneratedComponentKind::TerminalComponent => {
@@ -4473,6 +5318,10 @@ pub(crate) fn decode_generated_element_node<'a>(
             decode_generated_split_component(term)
                 .map(|node| ElementNode::SplitComponent(node))
         }
+        GeneratedComponentKind::PanZoomComponent => {
+            decode_generated_pan_zoom_component(term)
+                .map(|node| ElementNode::PanZoomComponent(node))
+        }
         GeneratedComponentKind::ButtonComponent => {
             decode_generated_button_component(term)
                 .map(|node| ElementNode::ButtonComponent(node))
@@ -4496,6 +5345,14 @@ pub(crate) fn decode_generated_element_node<'a>(
         GeneratedComponentKind::TooltipComponent => {
             decode_generated_tooltip_component(term)
                 .map(|node| ElementNode::TooltipComponent(node))
+        }
+        GeneratedComponentKind::TooltipContentComponent => {
+            decode_generated_tooltip_content_component(term)
+                .map(|node| ElementNode::TooltipContentComponent(node))
+        }
+        GeneratedComponentKind::TooltipShortcutComponent => {
+            decode_generated_tooltip_shortcut_component(term)
+                .map(|node| ElementNode::TooltipShortcutComponent(node))
         }
         GeneratedComponentKind::TooltipTriggerComponent => {
             decode_generated_tooltip_trigger_component(term)
@@ -4690,6 +5547,9 @@ pub(crate) fn render_generated_component_node(
         ElementNode::SplitComponent(node) => {
             element::component::split::render(node, context)
         }
+        ElementNode::PanZoomComponent(node) => {
+            element::component::pan_zoom::render_pan_zoom(node, context)
+        }
         ElementNode::ButtonComponent(node) => {
             element::component::controls::render_button_component(node, context)
         }
@@ -4707,6 +5567,12 @@ pub(crate) fn render_generated_component_node(
         }
         ElementNode::TooltipComponent(node) => {
             element::component::overlay::tooltip::render_tooltip(node, context)
+        }
+        ElementNode::TooltipContentComponent(node) => {
+            element::component::overlay::tooltip::render_tooltip_content(node)
+        }
+        ElementNode::TooltipShortcutComponent(node) => {
+            element::component::overlay::tooltip::render_tooltip_shortcut(node)
         }
         ElementNode::TooltipTriggerComponent(node) => {
             element::component::overlay::tooltip::render_tooltip_trigger(node, context)

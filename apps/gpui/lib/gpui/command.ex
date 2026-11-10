@@ -1,11 +1,14 @@
 defmodule GPUI.Command do
   @moduledoc """
-  Declarative application command bound to a modified keyboard shortcut.
+  Declarative application command bound to a keyboard shortcut.
 
   Command IDs are the same non-empty event names used by buttons and menus.
   Shortcuts use `primary` for Command on macOS and Control elsewhere, with
-  optional `ctrl`, `alt`, and `shift` modifiers, for example `primary-r` or
-  `primary-shift-p`.
+  optional `ctrl`, `alt`, and `shift` modifiers, for example `primary-r`,
+  `shift-r`, or `s`. Named keys use canonical lowercase names such as `enter`,
+  `escape`, `tab`, and `down`. Unmodified and Shift-only commands are suppressed while
+  an editable input has focus. Window commands capture across the window; use
+  a focus-scoped container `phx-keyrelease` callback for region-specific keys.
   """
 
   @enforce_keys [:id, :shortcut]
@@ -17,6 +20,7 @@ defmodule GPUI.Command do
   @max_id_bytes 128
   @max_shortcut_bytes 64
   @modifiers ~w(primary ctrl alt shift)
+  @named_keys ~w(enter escape tab space backspace delete up down left right home end pageup pagedown)
 
   @doc "Builds and validates one application command."
   @spec new(String.t(), String.t()) :: t()
@@ -70,7 +74,7 @@ defmodule GPUI.Command do
 
     unless valid_modifiers?(modifiers) and valid_key?(key) do
       raise ArgumentError,
-            "command shortcut must contain primary, ctrl, or alt plus one lowercase key; " <>
+            "command shortcut must contain canonical modifiers and one lowercase key; " <>
               "got: #{inspect(shortcut)}"
     end
   end
@@ -82,17 +86,13 @@ defmodule GPUI.Command do
   end
 
   defp valid_modifiers?(modifiers) do
-    {known?, activation_modifier?} =
-      Enum.reduce(modifiers, {true, false}, fn modifier, {known?, activation?} ->
-        {known? and modifier in @modifiers, activation? or modifier in ~w(primary ctrl alt)}
-      end)
-
-    modifiers != [] and known? and activation_modifier? and
+    Enum.all?(modifiers, &(&1 in @modifiers)) and
       modifiers == Enum.filter(@modifiers, &(&1 in modifiers)) and
       length(modifiers) == MapSet.size(MapSet.new(modifiers))
   end
 
-  defp valid_key?(key), do: is_binary(key) and Regex.match?(~r/^[a-z0-9]$/, key)
+  defp valid_key?(key),
+    do: key in @named_keys or (is_binary(key) and Regex.match?(~r/^[a-z0-9.\/\[\]]$/, key))
 
   defp reject_duplicates!(commands, key, description) do
     values = Enum.map(commands, key)

@@ -26,9 +26,6 @@ impl CommandBinding {
             .collect::<Vec<_>>()
             .join("-");
         let shortcut = gpui::Keystroke::parse(&shortcut).map_err(|_error| "invalid_command")?;
-        if !(shortcut.modifiers.platform || shortcut.modifiers.control || shortcut.modifiers.alt) {
-            return Err("invalid_command");
-        }
 
         Ok(Self {
             id,
@@ -43,14 +40,98 @@ impl CommandBinding {
 
 #[cfg(feature = "real-gpui")]
 fn native_editing_shortcut(keystroke: &gpui::Keystroke) -> bool {
-    (keystroke.modifiers.platform || keystroke.modifiers.control)
-        && !keystroke.modifiers.alt
-        && matches!(keystroke.key.as_str(), "a" | "c" | "v" | "x" | "y" | "z")
+    let modifiers = &keystroke.modifiers;
+    let text_key = !modifiers.platform && !modifiers.control && !modifiers.alt;
+    let editing_command = (modifiers.platform || modifiers.control)
+        && !modifiers.alt
+        && matches!(
+            keystroke.key.as_str(),
+            "a" | "c" | "v" | "x" | "y" | "z" | "left" | "right"
+        );
+    text_key || editing_command
+}
+
+#[cfg(feature = "real-gpui")]
+fn root_capture_matches(keystroke: &gpui::Keystroke, keys: &[String], input_focused: bool) -> bool {
+    let modifiers = keystroke.modifiers;
+    if input_focused
+        || modifiers.control
+        || modifiers.alt
+        || modifiers.platform
+        || modifiers.function
+    {
+        return false;
+    }
+    keys.iter().any(|binding| {
+        if modifiers.shift {
+            binding.strip_prefix("shift-") == Some(keystroke.key.as_str())
+        } else {
+            binding == &keystroke.key
+        }
+    })
+}
+
+#[cfg(feature = "real-gpui")]
+fn root_key_capture(tree: &ElementNode) -> Option<(String, Vec<String>)> {
+    match tree {
+        ElementNode::Div(node) => node
+            .keycapture
+            .as_ref()
+            .map(|event| (event.clone(), node.capture_keys.clone())),
+        ElementNode::Viewport(node) => node.children.first().and_then(root_key_capture),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "real-gpui")]
+#[derive(Clone)]
+struct RootInputEvents {
+    keyrelease: Option<String>,
+    pointer_position: Option<String>,
+    pointer_up: Option<String>,
+    runtime: SharedRuntime,
+    window_id: u64,
+}
+
+#[cfg(feature = "real-gpui")]
+fn root_input_events(
+    tree: &ElementNode,
+    runtime: SharedRuntime,
+    window_id: u64,
+) -> Option<RootInputEvents> {
+    match tree {
+        ElementNode::Div(node) => Some(RootInputEvents {
+            keyrelease: node.window_keyrelease.clone(),
+            pointer_position: node.window_pointer_position.clone(),
+            pointer_up: node.window_pointer_up.clone(),
+            runtime,
+            window_id,
+        }),
+        ElementNode::Viewport(node) => node
+            .children
+            .first()
+            .and_then(|tree| root_input_events(tree, runtime, window_id)),
+        _ => None,
+    }
 }
 
 #[cfg(all(test, feature = "real-gpui"))]
 mod command_tests {
-    use super::{native_editing_shortcut, CommandBinding};
+    use super::{native_editing_shortcut, root_capture_matches, CommandBinding};
+
+    #[test]
+    fn explicit_shift_capture_preserves_editing_and_unlisted_modifiers() {
+        let keys = vec!["r".into(), "shift-c".into(), "shift-enter".into()];
+        for key in ["r", "shift-c", "shift-enter"] {
+            let keystroke = zed_gpui::Keystroke::parse(key).unwrap();
+            assert!(root_capture_matches(&keystroke, &keys, false));
+            assert!(!root_capture_matches(&keystroke, &keys, true));
+        }
+        for key in ["c", "shift-r", "secondary-r", "ctrl-r", "alt-r"] {
+            let keystroke = zed_gpui::Keystroke::parse(key).unwrap();
+            assert!(!root_capture_matches(&keystroke, &keys, false));
+        }
+    }
 
     #[test]
     fn primary_shortcuts_use_gpui_platform_matching() {
@@ -70,6 +151,21 @@ mod command_tests {
 
         assert!(native_editing_shortcut(&select_all));
         assert!(!native_editing_shortcut(&refresh));
+        for key in [
+            "secondary-left",
+            "secondary-right",
+            "ctrl-left",
+            "ctrl-right",
+        ] {
+            let keystroke = zed_gpui::Keystroke::parse(key).expect("valid cursor shortcut");
+            assert!(native_editing_shortcut(&keystroke));
+        }
+        for key in ["s", "shift-r", "1", "enter", "down"] {
+            let keystroke = zed_gpui::Keystroke::parse(key).expect("valid keystroke");
+            assert!(native_editing_shortcut(&keystroke));
+            let binding = CommandBinding::new("command".into(), key.into()).expect("valid binding");
+            assert!(binding.matches(&keystroke));
+        }
     }
 }
 
@@ -111,6 +207,11 @@ type DialogKeyHandler = Arc<dyn Fn(&gpui::KeyDownEvent, &mut gpui::Window, &mut 
 pub(crate) struct ElixirRoot {
     pub(crate) window_state: SharedWindow,
     pub(crate) runtime: SharedRuntime,
+    pub(crate) pointer_observers: crate::element::event::PointerObservers,
+    pointer_focus: Option<gpui::FocusHandle>,
+    pub(crate) scrolls: crate::element::scroll::Scrolls,
+    #[cfg(feature = "components")]
+    pub(crate) horizontal_groups: crate::element::component::horizontal::Groups,
     pub(crate) window_id: u64,
     input_entities: HashMap<String, gpui::Entity<NativeTextInput>>,
     terminal_entities: HashMap<String, gpui::Entity<crate::element::component::terminal::Terminal>>,
@@ -118,6 +219,11 @@ pub(crate) struct ElixirRoot {
     pub(crate) components: crate::element::component_registry::ComponentRegistry,
     command_subscription: Option<gpui::Subscription>,
     activation_subscription: Option<gpui::Subscription>,
+    appearance_subscription: Option<gpui::Subscription>,
+    geometry_subscription: Option<gpui::Subscription>,
+    geometry_window: bool,
+    last_geometry: Option<gpui::Bounds<gpui::Pixels>>,
+    pub(crate) appearance_window: bool,
     focus_window: bool,
     blur_window: bool,
     observe_commands: bool,
@@ -131,6 +237,37 @@ pub(crate) struct ElixirRoot {
 
 #[cfg(feature = "real-gpui")]
 impl ElixirRoot {
+    #[cfg(feature = "components")]
+    pub(crate) fn render_tooltip_children(
+        &mut self,
+        nodes: Vec<crate::ElementNode>,
+        id_namespace: String,
+        window: &mut gpui::Window,
+        cx: &mut gpui::Context<Self>,
+    ) -> Vec<gpui::AnyElement> {
+        let mut active_input_ids = HashSet::new();
+        let mut context = ElementRenderContext {
+            pointer_observers: self.pointer_observers.clone(),
+            scrolls: self.scrolls.clone(),
+            horizontal_groups: self.horizontal_groups.clone(),
+            tooltip_focus_owner: None,
+            runtime: self.runtime.clone(),
+            window_id: self.window_id,
+            next_element_id: 0,
+            id_namespace,
+            active_input_ids: &mut active_input_ids,
+            input_entities: &mut self.input_entities,
+            terminal_entities: &mut self.terminal_entities,
+            components: &mut self.components,
+            window,
+            cx,
+        };
+        nodes
+            .into_iter()
+            .map(|node| node.render(&mut context))
+            .collect()
+    }
+
     pub(crate) fn new(
         window_state: SharedWindow,
         runtime: SharedRuntime,
@@ -142,12 +279,22 @@ impl ElixirRoot {
             window_state,
             runtime,
             window_id,
+            pointer_observers: Default::default(),
+            pointer_focus: None,
+            scrolls: Default::default(),
+            #[cfg(feature = "components")]
+            horizontal_groups: Default::default(),
             input_entities: HashMap::new(),
             terminal_entities: HashMap::new(),
             #[cfg(feature = "components")]
             components: crate::element::component_registry::ComponentRegistry::default(),
             command_subscription: None,
             activation_subscription: None,
+            appearance_subscription: None,
+            geometry_subscription: None,
+            geometry_window: false,
+            last_geometry: None,
+            appearance_window: false,
             focus_window,
             blur_window,
             observe_commands: true,
@@ -176,6 +323,77 @@ impl ElixirRoot {
         root
     }
 
+    fn report_appearance(&self, window: &mut gpui::Window, cx: &mut gpui::App) {
+        #[cfg(feature = "components")]
+        if cx.has_global::<gpui_component::Theme>() {
+            gpui_component::Theme::sync_system_appearance(Some(&mut *window), cx);
+        }
+        #[cfg(not(feature = "components"))]
+        let _ = cx;
+        if self.appearance_window {
+            let dark = matches!(
+                window.appearance(),
+                gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
+            );
+            let _ = push_event(
+                &self.runtime,
+                NativeEvent::WindowAppearance {
+                    window_id: self.window_id,
+                    dark,
+                },
+            );
+        }
+    }
+
+    fn report_geometry(&mut self, window: &gpui::Window, initial: bool) {
+        if !self.geometry_window || window.is_fullscreen() {
+            return;
+        }
+        let bounds = window.bounds();
+        if bounds.size.width <= gpui::px(0.0)
+            || bounds.size.height <= gpui::px(0.0)
+            || self.last_geometry == Some(bounds)
+        {
+            return;
+        }
+        self.last_geometry = Some(bounds);
+        let _ = push_event(
+            &self.runtime,
+            NativeEvent::WindowGeometry {
+                window_id: self.window_id,
+                bounds: vec![
+                    f32::from(bounds.origin.x) as f64,
+                    f32::from(bounds.origin.y) as f64,
+                    f32::from(bounds.size.width) as f64,
+                    f32::from(bounds.size.height) as f64,
+                ],
+                initial,
+            },
+        );
+    }
+
+    fn observe_geometry(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        if self.geometry_subscription.is_some() || !self.geometry_window {
+            return;
+        }
+        self.geometry_subscription = Some(cx.observe_window_bounds(window, |root, window, _cx| {
+            root.report_geometry(window, false);
+        }));
+        self.report_geometry(window, true);
+    }
+
+    fn observe_appearance(&mut self, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
+        if self.appearance_subscription.is_some() || !self.observe_commands {
+            return;
+        }
+        self.appearance_subscription =
+            Some(cx.observe_window_appearance(window, |root, window, cx| {
+                root.report_appearance(window, cx);
+                cx.notify();
+            }));
+        self.report_appearance(window, cx);
+    }
+
     fn observe_window_activation(
         &mut self,
         window: &mut gpui::Window,
@@ -198,6 +416,13 @@ impl ElixirRoot {
                 }
             },
         ));
+        let focused = window.is_window_active();
+        if (focused && focus_window) || (!focused && blur_window) {
+            let _ = push_event(
+                &self.runtime,
+                NativeEvent::WindowFocus { focused, window_id },
+            );
+        }
     }
 
     fn editable_input_focused(&self, window: &gpui::Window, cx: &gpui::App) -> bool {
@@ -221,10 +446,7 @@ impl ElixirRoot {
     }
 
     fn observe_commands(&mut self, window: &gpui::Window, cx: &mut gpui::Context<Self>) {
-        if !self.observe_commands
-            || self.command_subscription.is_some()
-            || self.window_state.commands.is_empty()
-        {
+        if !self.observe_commands || self.command_subscription.is_some() {
             return;
         }
 
@@ -232,28 +454,97 @@ impl ElixirRoot {
         let commands = self.window_state.commands.clone();
         let runtime = self.runtime.clone();
         let window_id = self.window_id;
-        self.command_subscription = Some(cx.observe_keystrokes(move |root, event, window, cx| {
-            if window.window_handle() != expected_window
-                || (native_editing_shortcut(&event.keystroke)
-                    && root.editable_input_focused(window, cx))
-            {
+        let view = cx.weak_entity();
+        self.command_subscription = Some(cx.intercept_keystrokes(move |event, window, cx| {
+            let Some(view) = view.upgrade() else {
                 return;
-            }
+            };
+            view.update(cx, |root, cx| {
+                if window.window_handle() != expected_window {
+                    return;
+                }
+                if event.keystroke.key == "escape" && runtime.overlay_owns_escape(window_id) {
+                    return;
+                }
+                let input_focused = root.editable_input_focused(window, cx)
+                    || event
+                        .context_stack
+                        .iter()
+                        .any(|context| context.contains("GPUIInput") || context.contains("Input"));
+                let capture = root
+                    .window_state
+                    .tree
+                    .lock()
+                    .ok()
+                    .and_then(|tree| root_key_capture(&tree));
+                if let Some((callback, keys)) = capture {
+                    let modifiers = event.keystroke.modifiers;
+                    let captured = root_capture_matches(&event.keystroke, &keys, input_focused);
+                    let _ = push_event(
+                        &runtime,
+                        NativeEvent::CapturedKeystroke {
+                            window_id,
+                            event: callback,
+                            captured,
+                            value: crate::event::KeyStroke {
+                                key: event.keystroke.key.clone(),
+                                control: modifiers.control,
+                                alt: modifiers.alt,
+                                shift: modifiers.shift,
+                                platform: modifiers.platform,
+                                repeat: false,
+                            },
+                        },
+                    );
+                    if captured {
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
+                if native_editing_shortcut(&event.keystroke) && input_focused {
+                    return;
+                }
 
-            if let Some(command) = commands
-                .iter()
-                .find(|command| command.matches(&event.keystroke))
-            {
-                let _ = push_event(
-                    &runtime,
-                    NativeEvent::Command {
-                        window_id,
-                        event: command.id.clone(),
-                    },
-                );
-            }
+                if let Some(command) = commands
+                    .iter()
+                    .find(|command| command.matches(&event.keystroke))
+                {
+                    cx.stop_propagation();
+                    let _ = push_event(
+                        &runtime,
+                        NativeEvent::Command {
+                            window_id,
+                            event: command.id.clone(),
+                        },
+                    );
+                }
+            });
         }));
     }
+}
+
+#[cfg(all(feature = "real-gpui", feature = "components"))]
+pub(crate) fn bind_dialog_content_keys(cx: &mut gpui::App) {
+    // The component library binds Enter to confirm the whole dialog. Elixir
+    // dialogs delegate activation to their focused controls instead.
+    cx.bind_keys([gpui::KeyBinding::new(
+        "enter",
+        gpui::NoAction {},
+        Some("GPUIElixirDialogContent"),
+    )]);
+}
+
+#[cfg(feature = "real-gpui")]
+fn root_rem_size(tree: &ElementNode) -> f64 {
+    if let ElementNode::Viewport(node) = tree {
+        if let Some(size) = node.rem_size {
+            return size;
+        }
+        if node.children.len() == 1 {
+            return root_rem_size(&node.children[0]);
+        }
+    }
+    16.0
 }
 
 #[cfg(feature = "real-gpui")]
@@ -263,8 +554,17 @@ impl gpui::Render for ElixirRoot {
         _window: &mut gpui::Window,
         cx: &mut gpui::Context<Self>,
     ) -> impl gpui::IntoElement {
+        let pointer_focus = self
+            .pointer_focus
+            .get_or_insert_with(|| cx.focus_handle().tab_stop(false))
+            .clone();
+        if _window.focused(cx).is_none() {
+            pointer_focus.focus(_window, cx);
+        }
         self.observe_commands(_window, cx);
         self.observe_window_activation(_window, cx);
+        self.observe_geometry(_window, cx);
+        self.observe_appearance(_window, cx);
 
         let tree = self
             .window_state
@@ -272,14 +572,42 @@ impl gpui::Render for ElixirRoot {
             .lock()
             .map(|tree| tree.clone())
             .unwrap_or_else(|_| ElementNode::empty_root());
+        if self.observe_commands {
+            _window.set_rem_size(gpui::px(root_rem_size(&tree) as f32));
+        }
+        #[cfg(feature = "components")]
+        let owns_bounds_frame = self.render_dialog_layer;
+        #[cfg(not(feature = "components"))]
+        let owns_bounds_frame = true;
+        if owns_bounds_frame {
+            if let Ok(mut bounds) = self.runtime.element_bounds.lock() {
+                bounds.begin_frame(self.window_id);
+            }
+        }
+        let input_events = if self.observe_commands {
+            root_input_events(&tree, self.runtime.clone(), self.window_id)
+        } else {
+            None
+        };
+        let id_namespace = format!("root-{:?}", cx.entity_id());
         let mut active_input_ids = HashSet::new();
         #[cfg(feature = "components")]
         self.components.begin_render();
+        self.pointer_observers.borrow_mut().clear();
+        crate::element::scroll::begin_frame(&self.scrolls);
+        #[cfg(feature = "components")]
+        crate::element::component::horizontal::begin_frame(&self.horizontal_groups);
         let element = tree.render(&mut ElementRenderContext {
+            pointer_observers: self.pointer_observers.clone(),
+            scrolls: self.scrolls.clone(),
+            #[cfg(feature = "components")]
+            horizontal_groups: self.horizontal_groups.clone(),
+            #[cfg(feature = "components")]
+            tooltip_focus_owner: None,
             runtime: self.runtime.clone(),
             window_id: self.window_id,
             next_element_id: 0,
-            id_namespace: "root".to_string(),
+            id_namespace: id_namespace.clone(),
             active_input_ids: &mut active_input_ids,
             input_entities: &mut self.input_entities,
             terminal_entities: &mut self.terminal_entities,
@@ -295,7 +623,7 @@ impl gpui::Render for ElixirRoot {
         #[cfg(feature = "components")]
         self.components.finish_render(_window, cx);
 
-        let input_prefix = format!("gpui-elixir-input-{}-root-", self.window_id);
+        let input_prefix = format!("gpui-elixir-input-{}-{}-", self.window_id, id_namespace);
         if let Ok(mut input_values) = self.runtime.input_values.lock() {
             input_values.retain(|input_id, _value| {
                 !input_id.starts_with(&input_prefix) || active_input_ids.contains(input_id)
@@ -310,7 +638,13 @@ impl gpui::Render for ElixirRoot {
                 .child(element)
                 .children(gpui_component::Root::render_dialog_layer(_window, cx))
                 .into_any_element();
-            return acknowledge_frame(element, self.window_state.clone());
+            return acknowledge_frame(
+                element,
+                self.window_state.clone(),
+                self.pointer_observers.clone(),
+                pointer_focus,
+                input_events,
+            );
         }
 
         #[cfg(feature = "components")]
@@ -321,20 +655,39 @@ impl gpui::Render for ElixirRoot {
 
             let element = gpui::div()
                 .id("gpui-elixir-dialog-content")
+                .key_context("GPUIElixirDialogContent")
                 .track_focus(&focus.tab_stop(true))
                 .on_key_down(move |event, window, cx| key_handler(event, window, cx))
                 .child(element)
                 .into_any_element();
-            return acknowledge_frame(element, self.window_state.clone());
+            return acknowledge_frame(
+                element,
+                self.window_state.clone(),
+                self.pointer_observers.clone(),
+                pointer_focus,
+                input_events,
+            );
         }
 
-        acknowledge_frame(element, self.window_state.clone())
+        acknowledge_frame(
+            element,
+            self.window_state.clone(),
+            self.pointer_observers.clone(),
+            pointer_focus,
+            input_events,
+        )
     }
 }
 
 #[cfg(feature = "real-gpui")]
-fn acknowledge_frame(element: gpui::AnyElement, window_state: SharedWindow) -> gpui::AnyElement {
-    use gpui::{IntoElement, ParentElement, Styled};
+fn acknowledge_frame(
+    element: gpui::AnyElement,
+    window_state: SharedWindow,
+    pointer_observers: crate::element::event::PointerObservers,
+    pointer_focus: gpui::FocusHandle,
+    input_events: Option<RootInputEvents>,
+) -> gpui::AnyElement {
+    use gpui::{InteractiveElement, IntoElement, ParentElement, Styled};
     use std::sync::atomic::Ordering;
 
     let barrier = gpui::canvas(
@@ -349,14 +702,72 @@ fn acknowledge_frame(element: gpui::AnyElement, window_state: SharedWindow) -> g
                 complete_frame(&window_state, generation, frame_generation)
             });
         },
-        |_bounds, _prepaint, _window, _cx| {},
+        {
+            let input_events = input_events.clone();
+            move |_bounds, _prepaint, window, _cx| {
+                if let Some(input) = &input_events {
+                    if let Some(callback) = &input.pointer_position {
+                        let (event, runtime, window_id) =
+                            (callback.clone(), input.runtime.clone(), input.window_id);
+                        window.on_mouse_event(move |mouse: &gpui::MouseMoveEvent, phase, _, _| {
+                            if phase == gpui::DispatchPhase::Capture {
+                                crate::element::event::emit_pointer_position(
+                                    &runtime,
+                                    window_id,
+                                    &event,
+                                    mouse.position,
+                                );
+                            }
+                        });
+                    }
+                    if let Some(callback) = &input.pointer_up {
+                        let (event, runtime, window_id) =
+                            (callback.clone(), input.runtime.clone(), input.window_id);
+                        window.on_mouse_event(move |mouse: &gpui::MouseUpEvent, phase, _, _| {
+                            if phase == gpui::DispatchPhase::Capture
+                                && mouse.button == gpui::MouseButton::Left
+                            {
+                                crate::element::event::emit_pointer_position(
+                                    &runtime,
+                                    window_id,
+                                    &event,
+                                    mouse.position,
+                                );
+                            }
+                        });
+                    }
+                }
+            }
+        },
     )
     .absolute()
     .size_full();
 
-    gpui::div()
-        .relative()
+    let mut root = gpui::div();
+    if let Some(input) = input_events {
+        if let Some(event) = input.keyrelease {
+            let (runtime, window_id) = (input.runtime, input.window_id);
+            root = root.capture_key_up(move |key, _, _| {
+                crate::element::event::emit_structured_key(
+                    &runtime,
+                    window_id,
+                    &event,
+                    &key.keystroke,
+                    false,
+                );
+            });
+        }
+    }
+    root.relative()
         .size_full()
+        .track_focus(&pointer_focus)
+        .on_modifiers_changed(move |event, _, cx| {
+            crate::element::event::dispatch_pointer_modifiers(
+                &pointer_observers,
+                event.modifiers,
+                cx,
+            )
+        })
         .child(barrier)
         .child(element)
         .into_any_element()
@@ -421,6 +832,7 @@ fn await_generation(
 #[cfg(feature = "real-gpui")]
 #[derive(Clone, Copy)]
 pub(crate) enum NativeThemeMode {
+    System,
     Light,
     Dark,
 }
@@ -434,11 +846,16 @@ pub(crate) enum WindowCommand {
         width: f32,
         height: f32,
         min_size: Option<(f32, f32)>,
+        restore_bounds: Option<Vec<f64>>,
+        cascade_offset: u32,
+        center_in_work_area: bool,
+        geometry: bool,
         resizable: bool,
         content_chrome: bool,
         close_request: bool,
         focus: bool,
         blur: bool,
+        appearance: bool,
         window_state: SharedWindow,
         runtime: SharedRuntime,
         reply: WindowCommandReply,
@@ -474,9 +891,38 @@ pub(crate) enum WindowCommand {
         runtime_id: u64,
         reply: Option<WindowCommandReply>,
     },
+    ShowSystemNotification {
+        tag: String,
+        title: String,
+        subtitle: String,
+        body: String,
+        sound: bool,
+        reply: WindowCommandReply,
+    },
+    DismissSystemNotification {
+        tag: String,
+        reply: WindowCommandReply,
+    },
+    SubscribeSystemNotifications {
+        pid: rustler::LocalPid,
+        reply: WindowCommandReply,
+    },
+    SystemNotificationPermission {
+        request: bool,
+        reply: std::sync::mpsc::SyncSender<Result<String, String>>,
+    },
+    ActivateWindow {
+        runtime_id: u64,
+        window_id: u64,
+        reply: WindowCommandReply,
+    },
     SetAppIdentity {
         identifier: String,
         name: String,
+        reply: WindowCommandReply,
+    },
+    LoadFont {
+        bytes: Vec<u8>,
         reply: WindowCommandReply,
     },
     SetTheme {
@@ -520,7 +966,10 @@ pub(crate) fn run_gpui(
 
     application.run(move |cx: &mut App| {
         #[cfg(feature = "components")]
-        gpui_component::init(cx);
+        {
+            gpui_component::init(cx);
+            bind_dialog_content_keys(cx);
+        }
 
         bind_input_keys(cx);
         crate::element::component::terminal::bind_terminal_keys(cx);
@@ -560,11 +1009,16 @@ fn handle_window_command(
             width,
             height,
             min_size,
+            restore_bounds,
+            cascade_offset,
+            center_in_work_area,
+            geometry,
             resizable,
             content_chrome,
             close_request,
             focus,
             blur,
+            appearance,
             window_state,
             runtime,
             reply,
@@ -581,11 +1035,16 @@ fn handle_window_command(
                     width,
                     height,
                     min_size,
+                    restore_bounds,
+                    cascade_offset,
+                    center_in_work_area,
+                    geometry,
                     resizable,
                     content_chrome,
                     close_request,
                     focus,
                     blur,
+                    appearance,
                 },
                 window_state.clone(),
                 runtime.clone(),
@@ -652,6 +1111,89 @@ fn handle_window_command(
                 send_reply(reply, result);
             }
         }
+        WindowCommand::ShowSystemNotification {
+            tag,
+            title,
+            subtitle,
+            body,
+            sound,
+            reply,
+        } => {
+            cx.show_system_notification_with_options(
+                gpui::SystemNotification {
+                    tag: tag.into(),
+                    title: title.into(),
+                    body: body.into(),
+                    actions: Vec::new(),
+                },
+                gpui::SystemNotificationOptions {
+                    subtitle: subtitle.into(),
+                    sound,
+                },
+            );
+            send_reply(reply, Ok(()));
+        }
+        WindowCommand::DismissSystemNotification { tag, reply } => {
+            cx.dismiss_system_notification(&tag);
+            send_reply(reply, Ok(()));
+        }
+        WindowCommand::SubscribeSystemNotifications { pid, reply } => {
+            cx.on_system_notification_response(move |response, _cx| {
+                let mut env = rustler::OwnedEnv::new();
+                let _ = env.send_and_clear(&pid, |env| {
+                    let marker = rustler::Atom::from_str(env, "gpui_system_notification").unwrap();
+                    (
+                        marker,
+                        response.tag.to_string(),
+                        response.action_id.map(|id| id.to_string()),
+                    )
+                        .encode(env)
+                });
+            });
+            send_reply(reply, Ok(()));
+        }
+        WindowCommand::SystemNotificationPermission { request, reply } => {
+            let task = if request {
+                cx.request_system_notifications()
+            } else {
+                cx.system_notification_status()
+            };
+            cx.spawn(async move |_| {
+                let result = task
+                    .await
+                    .map(|status| {
+                        match status {
+                            gpui::SystemNotificationStatus::Authorized => "authorized",
+                            gpui::SystemNotificationStatus::Denied => "denied",
+                            gpui::SystemNotificationStatus::NotDetermined => "not_determined",
+                            gpui::SystemNotificationStatus::Unsupported => "unsupported",
+                        }
+                        .to_string()
+                    })
+                    .map_err(|error| error.to_string());
+                let _ = reply.send(result);
+            })
+            .detach();
+        }
+        WindowCommand::ActivateWindow {
+            runtime_id,
+            window_id,
+            reply,
+        } => {
+            let result = windows
+                .get(&(runtime_id, window_id))
+                .ok_or_else(|| "unknown_window".to_string())
+                .and_then(|managed| {
+                    managed
+                        .handle
+                        .update(cx, |_root, window, cx| {
+                            window.activate_window();
+                            cx.activate(true);
+                        })
+                        .map_err(|error| error.to_string())
+                });
+            send_reply(reply, result);
+        }
         WindowCommand::SetAppIdentity {
             identifier,
             name,
@@ -671,6 +1213,13 @@ fn handle_window_command(
             };
             send_reply(reply, result);
         }
+        WindowCommand::LoadFont { bytes, reply } => {
+            let result = cx
+                .text_system()
+                .add_fonts(vec![std::borrow::Cow::Owned(bytes)])
+                .map_err(|error| error.to_string());
+            send_reply(reply, result);
+        }
         WindowCommand::SetTheme { mode, reply } => {
             let result = set_component_theme(mode, windows, cx);
             send_reply(reply, result);
@@ -687,11 +1236,20 @@ fn set_component_theme(
     windows: &mut HashMap<WindowKey, ManagedWindow>,
     cx: &mut gpui::App,
 ) -> Result<(), String> {
-    let mode = match mode {
-        NativeThemeMode::Light => gpui_component::ThemeMode::Light,
-        NativeThemeMode::Dark => gpui_component::ThemeMode::Dark,
-    };
-    gpui_component::Theme::change(mode, None, cx);
+    match mode {
+        NativeThemeMode::System => {
+            cx.set_window_appearance(None);
+            gpui_component::Theme::sync_system_appearance(None, cx);
+        }
+        NativeThemeMode::Light => {
+            cx.set_window_appearance(Some(gpui::WindowAppearance::Light));
+            gpui_component::Theme::change(gpui_component::ThemeMode::Light, None, cx);
+        }
+        NativeThemeMode::Dark => {
+            cx.set_window_appearance(Some(gpui::WindowAppearance::Dark));
+            gpui_component::Theme::change(gpui_component::ThemeMode::Dark, None, cx);
+        }
+    }
 
     windows.values().try_for_each(|window| {
         window
@@ -721,6 +1279,9 @@ fn handle_platform_window_closed(
 
     if let Some(key) = key {
         if let Some(window) = windows.remove(&key) {
+            if let Ok(mut bounds) = window.runtime.element_bounds.lock() {
+                bounds.forget_window(key.1);
+            }
             let _ = push_event(
                 &window.runtime,
                 NativeEvent::WindowClosed { window_id: key.1 },
@@ -840,6 +1401,9 @@ fn close_gpui_window(
         .ok_or_else(|| "unknown_window".to_string())?;
     let runtime = window.runtime.clone();
     close_managed_window(window, cx)?;
+    if let Ok(mut bounds) = runtime.element_bounds.lock() {
+        bounds.forget_window(key.1);
+    }
     push_event(&runtime, NativeEvent::WindowClosed { window_id: key.1 })
         .map_err(|_error| "runtime_lock_failed".to_string())
 }
@@ -861,11 +1425,16 @@ struct WindowOpenConfig {
     width: f32,
     height: f32,
     min_size: Option<(f32, f32)>,
+    restore_bounds: Option<Vec<f64>>,
+    cascade_offset: u32,
+    center_in_work_area: bool,
+    geometry: bool,
     resizable: bool,
     content_chrome: bool,
     close_request: bool,
     focus: bool,
     blur: bool,
+    appearance: bool,
 }
 
 #[cfg(feature = "real-gpui")]
@@ -892,13 +1461,32 @@ fn open_gpui_window(
         width,
         height,
         min_size,
+        restore_bounds,
+        cascade_offset,
+        center_in_work_area,
+        geometry,
         resizable,
         content_chrome,
         close_request,
         focus,
         blur,
+        appearance,
     } = config;
-    let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
+    let centered = if center_in_work_area {
+        cx.primary_display()
+            .map(|display| {
+                work_area_center(
+                    display.visible_bounds(),
+                    size(px(width), px(height)),
+                    display.scale_factor(),
+                )
+            })
+            .unwrap_or_else(|| Bounds::centered(None, size(px(width), px(height)), cx))
+    } else {
+        Bounds::centered(None, size(px(width), px(height)), cx)
+    };
+    let restored = restored_window_bounds(restore_bounds.as_deref(), cascade_offset, cx);
+    let bounds = restored.unwrap_or(centered);
     let window_min_size = min_size.map(|(width, height)| size(px(width), px(height)));
     let titlebar = content_chrome.then(|| TitlebarOptions {
         title: Some(title.clone().into()),
@@ -914,7 +1502,12 @@ fn open_gpui_window(
         })
     };
     let window_decorations = content_chrome.then_some(WindowDecorations::Client);
-    let view = cx.new(|_cx| ElixirRoot::new(window_state, runtime.clone(), window_id, focus, blur));
+    let view = cx.new(|_cx| {
+        let mut root = ElixirRoot::new(window_state, runtime.clone(), window_id, focus, blur);
+        root.appearance_window = appearance;
+        root.geometry_window = geometry;
+        root
+    });
     let view_for_root = view.clone();
 
     let handle = cx
@@ -945,6 +1538,63 @@ fn open_gpui_window(
     Ok((handle, view))
 }
 
+#[cfg(feature = "real-gpui")]
+fn work_area_center(
+    area: gpui::Bounds<gpui::Pixels>,
+    size: gpui::Size<gpui::Pixels>,
+    scale: f32,
+) -> gpui::Bounds<gpui::Pixels> {
+    let scale = if scale.is_finite() && scale > 0.0 {
+        scale
+    } else {
+        1.0
+    };
+    let x = ((f32::from(area.size.width) - f32::from(size.width)) * scale / 2.0).trunc() / scale;
+    let y = ((f32::from(area.size.height) - f32::from(size.height)) * scale / 2.0).trunc() / scale;
+    gpui::Bounds::new(area.origin + gpui::point(gpui::px(x), gpui::px(y)), size)
+}
+
+#[cfg(feature = "real-gpui")]
+fn restored_window_bounds(
+    saved: Option<&[f64]>,
+    offset: u32,
+    cx: &gpui::App,
+) -> Option<gpui::Bounds<gpui::Pixels>> {
+    let [x, y, width, height] = saved? else {
+        return None;
+    };
+    if ![x, y, width, height].iter().all(|value| value.is_finite())
+        || *width <= 0.0
+        || *height <= 0.0
+    {
+        return None;
+    }
+    let frame = gpui::Bounds::new(
+        gpui::point(gpui::px(*x as f32), gpui::px(*y as f32)),
+        gpui::size(gpui::px(*width as f32), gpui::px(*height as f32)),
+    );
+    let area = cx
+        .displays()
+        .into_iter()
+        .map(|display| display.visible_bounds())
+        .find(|area| {
+            let slack = gpui::px(1.0);
+            frame.origin.x >= area.origin.x - slack
+                && frame.origin.y >= area.origin.y - slack
+                && frame.right() <= area.right() + slack
+                && frame.bottom() <= area.bottom() + slack
+        })?;
+    let mut result = frame;
+    let offset = gpui::px(offset as f32);
+    result.origin.x += offset;
+    result.origin.y += offset;
+    if offset > gpui::px(0.0) && (result.right() > area.right() || result.bottom() > area.bottom())
+    {
+        result.origin = area.origin + gpui::point(offset, offset);
+    }
+    Some(result)
+}
+
 #[cfg(feature = "components")]
 fn native_window_root(
     view: gpui::Entity<ElixirRoot>,
@@ -963,4 +1613,129 @@ fn native_window_root(
     _cx: &mut gpui::App,
 ) -> gpui::Entity<NativeWindowRoot> {
     view
+}
+
+#[cfg(all(test, feature = "real-gpui"))]
+mod appearance_tests {
+    use super::*;
+
+    #[test]
+    fn work_area_center_matches_physical_pixel_integer_division() {
+        let area = gpui::Bounds::new(
+            gpui::point(gpui::px(-1784.0), gpui::px(30.0)),
+            gpui::size(gpui::px(1784.0), gpui::px(1015.0)),
+        );
+        let size = gpui::size(gpui::px(1400.0), gpui::px(900.0));
+        assert_eq!(
+            work_area_center(area, size, 1.0).origin,
+            gpui::point(gpui::px(-1592.0), gpui::px(87.0))
+        );
+        assert_eq!(
+            work_area_center(area, size, 2.0).origin,
+            gpui::point(gpui::px(-1592.0), gpui::px(87.5))
+        );
+        let oversized = gpui::size(gpui::px(1800.0), gpui::px(1020.0));
+        assert_eq!(
+            work_area_center(area, oversized, 1.0).origin.y,
+            gpui::px(28.0)
+        );
+    }
+
+    #[gpui::test]
+    fn restored_bounds_validate_displays_and_cascade(cx: &mut gpui::TestAppContext) {
+        cx.update(|cx| {
+            let area = cx.displays()[0].visible_bounds();
+            let x = f32::from(area.origin.x) as f64 + 50.0;
+            let y = f32::from(area.origin.y) as f64 + 50.0;
+            let saved = [x, y, 400.0, 300.0];
+            let restored = restored_window_bounds(Some(&saved), 0, cx).unwrap();
+            assert_eq!(
+                restored.origin,
+                gpui::point(gpui::px(x as f32), gpui::px(y as f32))
+            );
+            let cascaded = restored_window_bounds(Some(&saved), 36, cx).unwrap();
+            assert_eq!(
+                cascaded.origin,
+                restored.origin + gpui::point(gpui::px(36.0), gpui::px(36.0))
+            );
+            let edge = [
+                f32::from(area.right()) as f64 - 400.0,
+                f32::from(area.bottom()) as f64 - 300.0,
+                400.0,
+                300.0,
+            ];
+            let rounded_edge = [edge[0] + 0.5, edge[1] + 0.5, edge[2], edge[3]];
+            let rounded = restored_window_bounds(Some(&rounded_edge), 0, cx).unwrap();
+            assert_eq!(f32::from(rounded.origin.x), rounded_edge[0] as f32);
+            assert_eq!(f32::from(rounded.origin.y), rounded_edge[1] as f32);
+            let wrapped = restored_window_bounds(Some(&edge), 36, cx).unwrap();
+            assert_eq!(
+                wrapped.origin,
+                area.origin + gpui::point(gpui::px(36.0), gpui::px(36.0))
+            );
+            assert!(
+                restored_window_bounds(Some(&[100000.0, 100000.0, 400.0, 300.0]), 0, cx).is_none()
+            );
+            assert!(restored_window_bounds(Some(&[0.0, 0.0, f64::NAN, 300.0]), 0, cx).is_none());
+        });
+    }
+
+    #[gpui::test]
+    fn geometry_observer_reports_initial_bounds_once(cx: &mut gpui::TestAppContext) {
+        let runtime = Arc::new(crate::runtime::RuntimeState::new());
+        let state = Arc::new(WindowState::new(
+            ElementNode::Text(crate::TextNode {
+                truncate_start: false,
+                text: "Geometry".into(),
+                style: Default::default(),
+            }),
+            Vec::new(),
+        ));
+        let owner = runtime.clone();
+        let _window = cx.add_window(move |window, cx| {
+            let mut root = ElixirRoot::new(state, owner, 10, false, false);
+            root.geometry_window = true;
+            root.observe_geometry(window, cx);
+            root.observe_geometry(window, cx);
+            root.report_geometry(window, false);
+            root
+        });
+        cx.run_until_parked();
+        let events = runtime.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert!(
+            matches!(&events[0], NativeEvent::WindowGeometry {window_id: 10, initial: true, bounds} if bounds.len() == 4)
+        );
+    }
+
+    #[gpui::test]
+    fn appearance_observer_reports_initial_mode_without_component_initialization(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let runtime = Arc::new(crate::runtime::RuntimeState::new());
+        let state = Arc::new(WindowState::new(
+            ElementNode::Text(crate::TextNode {
+                truncate_start: false,
+                text: "Appearance".into(),
+                style: Default::default(),
+            }),
+            Vec::new(),
+        ));
+        let runtime_for_view = runtime.clone();
+        let _window = cx.add_window(move |window, cx| {
+            let mut root = ElixirRoot::new(state, runtime_for_view, 9, false, false);
+            root.appearance_window = true;
+            root.observe_appearance(window, cx);
+            root
+        });
+        cx.run_until_parked();
+        let events = runtime.events.lock().expect("event queue");
+        assert!(matches!(
+            events.first(),
+            Some(NativeEvent::WindowAppearance {
+                window_id: 9,
+                dark: false,
+            })
+        ));
+    }
 }

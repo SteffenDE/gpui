@@ -14,6 +14,7 @@ name = "gpui_core"
 crate-type = ["rlib"]
 
 [dependencies]
+resvg = "0.46.0"
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "ico", "jpeg", "png", "tiff", "webp"] }
 ropey = { version = "=2.0.0-beta.1", features = ["metric_lines_lf", "metric_utf16"] }
-zed_gpui = { git = "https://github.com/zed-industries/zed", package = "gpui", optional = true }
+zed_gpui = { git = "https://github.com/zed-industries/zed", rev = "1662f5f3f6497c5f80830ccdca1edfd1fc0c6c6a", package = "gpui", optional = true }

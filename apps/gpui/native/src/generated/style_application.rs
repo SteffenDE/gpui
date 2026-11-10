@@ -208,6 +208,18 @@ pub fn apply(element: gpui::Div, style: Style) -> gpui::Div {
         }
         _ => {}
     };
+    if style.preserve_layout_bounds {
+        element = element.preserve_layout_bounds();
+    }
+    match style.paint_rounding.as_deref() {
+        Some("half_up") => {
+            element = element.paint_rounding_half_up();
+        }
+        Some("half_toward_zero") => {
+            element = element.paint_rounding_half_toward_zero();
+        }
+        _ => {}
+    };
     if style.truncate {
         element = element.truncate();
     }
@@ -238,6 +250,18 @@ pub fn apply(element: gpui::Div, style: Style) -> gpui::Div {
     match style.color {
         Some(value) => {
             element = element.text_color(gpui::rgba(value));
+        }
+        _ => {}
+    };
+    match style.text_decoration.as_deref() {
+        Some("underline") => {
+            element = element.underline();
+        }
+        _ => {}
+    };
+    match style.font_family {
+        Some(value) => {
+            element = element.font_family(value);
         }
         _ => {}
     };
@@ -292,9 +316,11 @@ pub fn apply(element: gpui::Div, style: Style) -> gpui::Div {
         }
         _ => {}
     };
-    match style.hover_background {
+    match style.group_hover_background {
         Some(value) => {
-            element = element.hover(|refinement| refinement.bg(gpui::rgba(value)));
+            let (group, color) = value;
+            element = element
+                .group_hover(group, |refinement| refinement.bg(gpui::rgba(color)));
         }
         _ => {}
     };
@@ -442,9 +468,86 @@ pub fn apply(element: gpui::Div, style: Style) -> gpui::Div {
         }
         _ => {}
     };
+    match style.border_top_left_radius {
+        Some(value) => {
+            element = element.rounded_tl(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_top_right_radius {
+        Some(value) => {
+            element = element.rounded_tr(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_bottom_right_radius {
+        Some(value) => {
+            element = element.rounded_br(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_bottom_left_radius {
+        Some(value) => {
+            element = element.rounded_bl(gpui::px(value));
+        }
+        _ => {}
+    };
     match style.border_width {
         Some(value) => {
             element = element.border(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_top_width {
+        Some(value) => {
+            element = element.border_t(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_right_width {
+        Some(value) => {
+            element = element.border_r(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_bottom_width {
+        Some(value) => {
+            element = element.border_b(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.border_left_width {
+        Some(value) => {
+            element = element.border_l(gpui::px(value));
+        }
+        _ => {}
+    };
+    match style.box_shadow {
+        Some(value) => {
+            let shadows = value
+                .into_iter()
+                .rev()
+                .map(|(x, y, blur, spread, color)| {
+                    gpui::BoxShadow::new(
+                            gpui::px(x),
+                            gpui::px(y),
+                            gpui::rgba(color).into(),
+                        )
+                        .blur_radius(gpui::px(blur / 2.0))
+                        .spread_radius(gpui::px(spread))
+                })
+                .collect();
+            element = element.shadow(shadows);
+        }
+        _ => {}
+    };
+    match style.ring_color {
+        Some(value) => {
+            element = element
+                .ring(
+                    gpui::px(style.ring_width.unwrap_or(1.0)),
+                    gpui::rgba(value).into(),
+                );
         }
         _ => {}
     };
@@ -454,5 +557,24 @@ pub fn apply(element: gpui::Div, style: Style) -> gpui::Div {
         }
         _ => {}
     };
+    if style.hover_color.is_some() || style.hover_background.is_some() {
+        element = element
+            .hover(|refinement| {
+                let mut refinement = refinement;
+                match style.hover_color {
+                    Some(value) => {
+                        refinement = refinement.text_color(gpui::rgba(value));
+                    }
+                    _ => {}
+                };
+                match style.hover_background {
+                    Some(value) => {
+                        refinement = refinement.bg(gpui::rgba(value));
+                    }
+                    _ => {}
+                };
+                refinement
+            });
+    }
     element
 }

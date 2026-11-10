@@ -9,7 +9,7 @@ defmodule GPUI.View do
 
   alias GPUI.Element
 
-  @type window_event :: :close_request | :focus | :blur
+  @type window_event :: :close_request | :focus | :blur | :appearance | :geometry
 
   @type callback_result ::
           {:noreply, map()}

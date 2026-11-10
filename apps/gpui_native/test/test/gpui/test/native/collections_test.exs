@@ -83,9 +83,17 @@ defmodule GPUI.Test.Native.CollectionsTest do
       <UI.virtual_collection
         id="variable-records"
         label="Variable records"
+        measure_all={true}
+        scrollbar={Map.get(assigns, :scrollbar, false)}
+        reveal={Map.get(assigns, :reveal)}
+        reveal_request={Map.get(assigns, :reveal_request, 0)}
+        reveal_strategy="top"
+        reveal_offset={Map.get(assigns, :reveal_offset, 0.0)}
         follow={assigns.follow}
         follow_request={assigns.follow_request}
         phx-range="variable_range"
+        phx-scroll="variable_scroll"
+        phx-measure={Map.get(assigns, :measure_event)}
         class="h-[200px]"
       >
         {Enum.map(assigns.items, &item/1)}
@@ -96,10 +104,83 @@ defmodule GPUI.Test.Native.CollectionsTest do
     defp item({id, revision, height}) do
       ~GPUI"""
       <UI.virtual_item id={id} revision={revision} style={[height: {:px, height}]}>
-        <text>{id}</text>
+        <div id={id <> "-label"} class="w-full h-full"><text>{id}</text></div>
       </UI.virtual_item>
       """
     end
+  end
+
+  test "variable collections report native item sizes and suppress unchanged measurements", %{
+    ui: ui
+  } do
+    attrs = [
+      items: [{"one", 0, 40}, {"two", 0, 80}],
+      follow: "none",
+      follow_request: 0,
+      measure_event: "item_size"
+    ]
+
+    render(ui, VariableView, attrs)
+    settle(ui)
+
+    assert_receive {:gpui, ^ui,
+                    {:event,
+                     %{
+                       type: :bounds,
+                       event: "item_size",
+                       value: %{id: "one", width: width, height: 40.0}
+                     }}}
+
+    assert width > 0
+
+    assert_receive {:gpui, ^ui,
+                    {:event,
+                     %{type: :bounds, event: "item_size", value: %{id: "two", height: 80.0}}}}
+
+    render(ui, VariableView, attrs)
+    settle(ui)
+    refute_receive {:gpui, ^ui, {:event, %{event: "item_size"}}}, 20
+    render(ui, VariableView, Keyword.put(attrs, :items, [{"one", 1, 100}, {"two", 0, 80}]))
+    settle(ui)
+
+    assert_receive {:gpui, ^ui,
+                    {:event,
+                     %{type: :bounds, event: "item_size", value: %{id: "one", height: 100.0}}}}
+  end
+
+  test "vertical scrollbar reserves its lane, pages, and drags variable rows", %{ui: ui} do
+    render(ui, VariableView,
+      items: Enum.map(1..20, &{"item-#{&1}", 0, 40}),
+      follow: "none",
+      follow_request: 0,
+      scrollbar: true
+    )
+
+    settle(ui)
+    collection = bounds(ui, "variable-records")
+    row = bounds(ui, "item-1-label")
+    assert_in_delta row.width, collection.width - 10, 0.1
+    x = collection.x + collection.width - 5
+    drag(ui, {x - 20, collection.y + 180}, {x, collection.y + 180})
+    click(ui, {x, collection.y + 180})
+    settle(ui)
+
+    assert_receive {:gpui, ^ui, {:event, %{event: "variable_scroll", value: [index, offset]}}}
+                   when index == 5 and offset == 0
+
+    # 800px of content in a 200px viewport: the thumb is 50px high,
+    # and a 50px thumb drag moves the content by 200px.
+    drag(ui, {x, collection.y + 75}, {x, collection.y + 125})
+    settle(ui)
+
+    assert_receive {:gpui, ^ui, {:event, %{event: "variable_scroll", value: [index, _]}}}
+                   when index >= 9
+
+    scroll(ui, "variable-records", delta: {0, 40})
+    settle(ui)
+
+    assert_receive {:gpui, ^ui, {:event, %{event: "variable_scroll", value: [index, _]}}}
+                   when index < 10
   end
 
   test "uniform list keyboard navigation skips disabled items", %{ui: ui} do
@@ -136,6 +217,107 @@ defmodule GPUI.Test.Native.CollectionsTest do
     assert range.first > initial.first
     assert range.first < range.last
     assert range.last <= 1_000
+  end
+
+  test "variable collections report the top item and its pixel offset", %{ui: ui} do
+    render(ui, VariableView,
+      items: Enum.map(1..8, &{"item-#{&1}", 0, 40}),
+      follow: "none",
+      follow_request: 0
+    )
+
+    settle(ui)
+
+    assert_receive {:gpui, ^ui,
+                    {:event, %{type: :change, event: "variable_scroll", value: [index, offset]}}}
+
+    assert index == 0 and offset == 0
+    scroll(ui, "variable-records", delta: {0, -55})
+    settle(ui)
+
+    assert_receive {:gpui, ^ui,
+                    {:event, %{type: :change, event: "variable_scroll", value: [index, offset]}}}
+
+    assert index == 1 and offset == 15
+  end
+
+  test "reveals retain a requested pixel offset after preceding insertion", %{ui: ui} do
+    items = Enum.map(1..8, &{"item-#{&1}", 0, 40})
+
+    render(ui, VariableView,
+      items: items,
+      follow: "none",
+      follow_request: 0,
+      reveal: "item-3",
+      reveal_request: 1,
+      reveal_offset: 7.5
+    )
+
+    settle(ui)
+
+    assert_receive {:gpui, ^ui, {:event, %{event: "variable_scroll", value: [index, offset]}}}
+                   when index == 2 and offset == 7.5
+
+    render(ui, VariableView,
+      items: [{"inserted", 0, 40} | items],
+      follow: "none",
+      follow_request: 0,
+      reveal: "item-3",
+      reveal_request: 2,
+      reveal_offset: 7.5
+    )
+
+    settle(ui)
+
+    assert_receive {:gpui, ^ui, {:event, %{event: "variable_scroll", value: [index, offset]}}}
+                   when index == 3 and offset == 7.5
+  end
+
+  test "negative top offsets place a revealed row below the viewport top using measured preceding heights",
+       %{ui: ui} do
+    items = Enum.map(1..20, &{"item-#{&1}", 0, if(rem(&1, 2) == 0, do: 60, else: 30)})
+
+    attrs = [
+      items: items,
+      follow: "none",
+      follow_request: 0,
+      reveal: "item-8",
+      reveal_request: 1,
+      reveal_offset: -85.0
+    ]
+
+    render(ui, VariableView, attrs)
+    settle(ui)
+    assert_in_delta bounds(ui, "item-8-label").y, 85.0, 0.1
+    refute_receive {:gpui, ^ui, {:event, %{event: "variable_scroll", value: [7, +0.0]}}}, 20
+
+    items = List.replace_at(items, 6, {"item-7", 1, 100})
+    render(ui, VariableView, Keyword.merge(attrs, items: items, reveal_request: 2))
+    settle(ui)
+    assert_in_delta bounds(ui, "item-8-label").y, 85.0, 0.1
+    refute_receive {:gpui, ^ui, {:event, %{event: "variable_scroll", value: [7, +0.0]}}}, 20
+
+    render(ui, VariableView, Keyword.merge(attrs, reveal: "item-1", reveal_request: 3))
+    settle(ui)
+    assert_in_delta bounds(ui, "item-1-label").y, 0.0, 0.1
+  end
+
+  test "exact measurement survives inserting items after an empty frame", %{ui: ui} do
+    render(ui, VariableView, items: [], follow: "none", follow_request: 0)
+    settle(ui)
+
+    render(ui, VariableView,
+      items: Enum.map(1..8, &{"inserted-#{&1}", 1, 60}),
+      follow: "none",
+      follow_request: 0
+    )
+
+    settle(ui)
+    scroll(ui, "variable-records", delta: {0, -255})
+    settle(ui)
+
+    assert_receive {:gpui, ^ui, {:event, %{event: "variable_scroll", value: [index, offset]}}}
+                   when index == 4 and offset == 15
   end
 
   test "variable collections survive empty, populated, resized, and empty transitions", %{ui: ui} do

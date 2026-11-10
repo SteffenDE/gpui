@@ -32,7 +32,13 @@ defmodule GPUI.Display do
   @callback presentation_capabilities(GenServer.server()) ::
               {:ok, [GPUI.Schema.Extension.Support.t()]} | {:error, term()}
 
-  @optional_callbacks await_frame: 3,
+  @callback set_theme(GenServer.server(), :system | :light | :dark) :: :ok | {:error, term()}
+
+  @callback activate_window(GenServer.server(), pos_integer()) :: :ok | {:error, term()}
+
+  @optional_callbacks activate_window: 2,
+                      set_theme: 2,
+                      await_frame: 3,
                       frame_token: 2,
                       await_frame_after: 4,
                       presentation_capabilities: 1

@@ -19,6 +19,38 @@ defmodule GPUI.Codegen.Native.TestOperations do
     end
   end
 
+  @spec native_test_double_click_impl(
+          Env.t(R.lifetime(:a)),
+          R.resource(NativeTest.NativeTestSessionResource.t()),
+          TargetRequest.t()
+        ) :: R.nif_result(term())
+  @cfg feature: "native-test"
+  defrust native_test_double_click_impl(env, session, request) do
+    encode_unit_result(env, double_click(ref(session), request.target))
+  end
+
+  @cfg not: [feature: "native-test"]
+  defrust(native_test_double_click_impl(env, _session, _request),
+    do: {:ok, {Atoms.error(), "native_test_disabled"}.encode(env)}
+  )
+
+  @spec native_test_pinch_impl(
+          Env.t(R.lifetime(:a)),
+          R.resource(NativeTest.NativeTestSessionResource.t()),
+          String.t(),
+          R.f64(),
+          String.t()
+        ) :: R.nif_result(term())
+  @cfg feature: "native-test"
+  defrust native_test_pinch_impl(env, session, target, delta, phase) do
+    encode_unit_result(env, pinch(ref(session), target, cast(delta, R.f32()), phase))
+  end
+
+  @cfg not: [feature: "native-test"]
+  defrust(native_test_pinch_impl(env, _session, _target, _delta, _phase),
+    do: {:ok, {Atoms.error(), "native_test_disabled"}.encode(env)}
+  )
+
   @spec native_test_focus_impl(
           Env.t(R.lifetime(:a)),
           R.resource(NativeTest.NativeTestSessionResource.t()),
@@ -242,7 +274,7 @@ defmodule GPUI.Codegen.Native.TestOperations do
         ) :: R.nif_result(term())
   @cfg feature: "native-test"
   defrust native_test_render_impl(env, session, request) do
-    tree = unwrap!(decode_element_node(request.tree))
+    tree = unwrap!(decode_tree(request.tree))
 
     case render(ref(session), tree) do
       {:ok, _unit} -> {:ok, {Atoms.ok(), Atoms.ok()}.encode(env)}
